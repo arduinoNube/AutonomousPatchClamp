@@ -1,0 +1,39 @@
+This design document delineates the scope and transitions between states
+
+1. HardwareInit -> GetPipette or Error
+
+This state initializes all the hardware connections (COM ports, ActiveX
+containers, dll intefaces, etc.) so they are ready to be used by all subsequent
+states.  Specifically, this means:
+
+COM ports are opened (Autopatcher, filler, SCARA, headstage clamp)
+ActiveX Containers are initialized and running (ThorLabs motor)
+DLL calls have been confirmed working (multiclamp)
+DAQ Is initialized and has run a self-check (not tasks have been created)
+
+If all the initializations succeed, the state proceeds to the "GetPipette" state
+If any of these initializations fail, the state proceeds to the "Error" state
+
+2. GetPipette -> SetBrainHeight or PipetteQC
+
+This state operates the SCARA robot to aquire a pipette.  It then switches to
+either the SetBrainHeight state or the PipetteQC state.  The SetBrainHeight
+state is selected the fisrt time the code is run or whenever a check box is set
+manually indicating that they'd like to reset the brain height the next time the
+pipette is changed.  If something goes wrong, it switches to the "Error" state.
+
+3. SetBrainHeight -> PipetteQC or Error
+
+This state sets the height of the surface of the brain either manually or
+automatically.  After it is complete, the pipette should be 20-30 microns above
+the surface of the brain submerged in ACSF.
+
+4. PipetteQC -> ClogCheck or Retract or Error
+
+This state checks the resistance of the pipette and if it passes inspection,
+lowers the pipette to the depth of interest in the brain and then switches to
+the "ClogCheck" state.  If not, it switches to the Retract" state.
+
+5. ClogCheck -> NeuronHunt or Error
+
+This state

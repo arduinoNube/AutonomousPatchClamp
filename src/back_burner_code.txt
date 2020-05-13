@@ -1,0 +1,19 @@
+// CODE FOR STAGE MACHINE
+
+QTimer atmosphericTimer;
+    QTimer rampTimer;
+    QTimer suctionTimer;
+    QTimer startWaitTimer1,startWaitTimer2,startWaitTimer3,startWaitTimer4,membraneTestTimer; // Wait timers for algorithm 1
+//    QTimer alg2WaitTimer1,alg2WaitTimer2,alg2WaitTimer3,alg2WaitTimer4,alg2WaitTimer5; // Wait timers for algorithm ,2
+    QTimer breakInTimer;
+    QTimer restartTimer; // Timer that automatically restarts if the user doesn't press start stimulus in less than 100 seconds.
+    QTimer gigasealAtmTimer;
+    QTimer retractTimer;
+    QTimer onePingTimer;
+
+    int resistanceMeasureMode;
+//    bool AP_originalRCheckAlgorithm;
+//    int AP_alg2StepNum, AP_clearMode;
+//    double res1,res2,res3,res4;
+
+void atDepth();

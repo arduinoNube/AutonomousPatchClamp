@@ -1,0 +1,19 @@
+1. Add "recording time" log variable
+2. Back up 20 um after descent
+3. Allow resistance drops after descent as long as it's not broken
+4. No cell detections allowed in the first 20 microns (items 2 and 3 may obviate this item)
+5. Pressure pulses & position adjustments to improve Ra
+6. High frequency pulses (70-200 Hz) for BAC firing.
+7. "BAD PIPETTES" due to bubbles, clogs, or already being inserted into the tissue
+8. Automated I-V curve processing
+9. Reduce the number of current injections required to get the IV curve and do cell QC.
+10. FIX THE ACCESS RESISTANCE CALCULATION
+
+Future:
+- Add trial note taking app in GUI to mention bleeding, which craniotomy was used, etc.
+- Pipette length measurement
+- On-line craniotomy monitoring and saline addition
+
+I probably shouldn't have the wait state controlling this state (quickAPDetect) since they're supposed to be independent,
+but I need a readable, global state switching function that is easily defined and human readable.  I'd
+prefer it not to be dynamic but I may have to go that way.

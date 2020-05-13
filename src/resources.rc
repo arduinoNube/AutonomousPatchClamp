@@ -1,0 +1,26 @@
+IDI_ICON1 ICON DISCARDABLE "/img/Logo_icon_all.ico"
+1 VERSIONINFO
+FILEVERSION     5,0,0,0
+PRODUCTVERSION  5,0,0,0
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904E4"
+        BEGIN
+            VALUE "CompanyName",        "GH Automation Inc."
+            VALUE "FileDescription",    "Robotic Patch Clamp Control"
+            VALUE "FileVersion",        "5.0.0.0\0"
+            VALUE "InternalName",       "Autopatch, autoswap 5.0"
+            VALUE "LegalCopyright",     "Copyright © 2015 Gregory Holst"
+            VALUE "LegalTrademarks1",   "All Rights Reserved"
+            VALUE "LegalTrademarks2",   "All Rights Reserved"
+            VALUE "OriginalFilename",   "RoboPatch.exe"
+            VALUE "ProductName",        "Autopatch5"
+            VALUE "ProductVersion",     "5.0\0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1252
+    END
+END

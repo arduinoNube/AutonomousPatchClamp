@@ -1,0 +1,127 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!-- Created with Inkscape (http://www.inkscape.org/) -->
+
+<svg
+   xmlns:dc="http://purl.org/dc/elements/1.1/"
+   xmlns:cc="http://creativecommons.org/ns#"
+   xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+   xmlns:svg="http://www.w3.org/2000/svg"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:xlink="http://www.w3.org/1999/xlink"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   width="744.09448819"
+   height="1052.3622047"
+   id="svg2"
+   version="1.1"
+   inkscape:version="0.48.4 r9939"
+   sodipodi:docname="New document 1">
+  <defs
+     id="defs4">
+    <linearGradient
+       id="linearGradient3769">
+      <stop
+         id="stop3771"
+         offset="0"
+         style="stop-color:#08ff0a;stop-opacity:1;" />
+      <stop
+         id="stop3773"
+         offset="1"
+         style="stop-color:#000000;stop-opacity:1;" />
+    </linearGradient>
+    <linearGradient
+       id="linearGradient3757">
+      <stop
+         style="stop-color:#838383;stop-opacity:1;"
+         offset="0"
+         id="stop3759" />
+      <stop
+         style="stop-color:#000000;stop-opacity:1;"
+         offset="1"
+         id="stop3761" />
+    </linearGradient>
+    <radialGradient
+       inkscape:collect="always"
+       xlink:href="#linearGradient3757"
+       id="radialGradient3763"
+       cx="129.13545"
+       cy="108.47097"
+       fx="129.13545"
+       fy="108.47097"
+       r="18.459832"
+       gradientTransform="matrix(2.0267224,-0.02380787,0.02531313,1.888551,-135.33199,-92.998778)"
+       gradientUnits="userSpaceOnUse" />
+    <radialGradient
+       inkscape:collect="always"
+       xlink:href="#linearGradient3769"
+       id="radialGradient3767"
+       gradientUnits="userSpaceOnUse"
+       gradientTransform="matrix(2.0267224,-0.02380787,0.02531313,1.888551,-135.33199,-92.998778)"
+       cx="129.13545"
+       cy="108.47097"
+       fx="129.13545"
+       fy="108.47097"
+       r="18.459831" />
+  </defs>
+  <sodipodi:namedview
+     id="base"
+     pagecolor="#ffffff"
+     bordercolor="#666666"
+     borderopacity="1.0"
+     inkscape:pageopacity="0.0"
+     inkscape:pageshadow="2"
+     inkscape:zoom="11.313708"
+     inkscape:cx="139.28007"
+     inkscape:cy="925.85444"
+     inkscape:document-units="px"
+     inkscape:current-layer="layer1"
+     showgrid="false"
+     inkscape:window-width="1200"
+     inkscape:window-height="1868"
+     inkscape:window-x="-8"
+     inkscape:window-y="-8"
+     inkscape:window-maximized="1" />
+  <metadata
+     id="metadata7">
+    <rdf:RDF>
+      <cc:Work
+         rdf:about="">
+        <dc:format>image/svg+xml</dc:format>
+        <dc:type
+           rdf:resource="http://purl.org/dc/dcmitype/StillImage" />
+        <dc:title></dc:title>
+      </cc:Work>
+    </rdf:RDF>
+  </metadata>
+  <g
+     inkscape:label="Layer 1"
+     inkscape:groupmode="layer"
+     id="layer1">
+    <path
+       sodipodi:type="arc"
+       style="fill:url(#radialGradient3763);fill-opacity:1;stroke:#d1d1d1;stroke-width:3.34823346;stroke-miterlimit:4;stroke-opacity:1;stroke-dasharray:none"
+       id="path2985"
+       sodipodi:cx="132.5"
+       sodipodi:cy="113.79076"
+       sodipodi:rx="16.785715"
+       sodipodi:ry="15.714286"
+       d="m 149.28572,113.79076 a 16.785715,15.714286 0 1 1 -33.57144,0 16.785715,15.714286 0 1 1 33.57144,0 z"
+       transform="matrix(0.54007453,0,0,0.57689781,52.953074,55.060986)"
+       inkscape:export-filename="C:\Users\gholst3\Dropbox\Research\Autoswapper\C++\Autopatch4\img\led_off.png"
+       inkscape:export-xdpi="90"
+       inkscape:export-ydpi="90" />
+    <path
+       transform="matrix(0.54007453,0,0,0.57689781,80.530239,55.060986)"
+       d="m 149.28572,113.79076 a 16.785715,15.714286 0 1 1 -33.57144,0 16.785715,15.714286 0 1 1 33.57144,0 z"
+       sodipodi:ry="15.714286"
+       sodipodi:rx="16.785715"
+       sodipodi:cy="113.79076"
+       sodipodi:cx="132.5"
+       id="path3765"
+       style="fill:url(#radialGradient3767);fill-opacity:1;stroke:#d1d1d1;stroke-width:3.34823346;stroke-miterlimit:4;stroke-opacity:1;stroke-dasharray:none"
+       sodipodi:type="arc"
+       inkscape:export-filename="C:\Users\gholst3\Dropbox\Research\Autoswapper\C++\Autopatch4\img\led_on.png"
+       inkscape:export-xdpi="90"
+       inkscape:export-ydpi="90" />
+  </g>
+</svg>

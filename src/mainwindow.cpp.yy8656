@@ -1,0 +1,2555 @@
+// Sublime text line count search
+// ^(.*)$
+// C:\Users\gholst3\Dropbox\Research\Autoswapper\C++\Qt 5.4\Autopatch_5.0\src,*.cpp,*.h,-*/daqmx_libs/*,-*/libssh2-1.4.3/*,-*/qcustomplot/*,-*/qcustomplot_old/*
+// 7/10/2015 - 9108 lines
+// 7/13/2015 - 9216 lines
+
+#include "mainwindow.h"
+#include "ui_mainwindow.h"
+#include "daqmx_libs/NIDAQmx.h"
+#include <qcustomplot/qcustomplot.h>
+#include <QDebug>
+#include <QVector>
+#include <vector>
+#include <fstream>
+#include <string>
+#include <ui/breakinsettingszap.h>
+#include <ui/breakinsettingssuction.h>
+#include <ui/breakinsettingsramp.h>
+#include <cmath>
+#include <QStringList>
+
+using namespace std;
+
+MainWindow::MainWindow(QWidget *parent) :
+    QMainWindow(parent),
+    ui(new Ui::MainWindow)
+{
+    // GUI Busy Symbol
+    busy.setParent(this);
+    busy.setInterval(200);
+    connect(&busy,SIGNAL(timeout()),this,SLOT(busyTimeout()));
+
+    // GUI Setup
+    guiInit();  // loading bitmaps, instantiating ui classes (settings windows), setting gui defaults, etc.
+
+    // Hardware Threads
+    // Assigning parent so the cleanup happens when the window is closed
+    daqThread.setParent(this);
+    multiclampThread.setParent(this);
+    tMotorThread.setParent(this);
+    autopatcherThread.setParent(this);
+    scaraThread.setParent(this);
+    fillerThread.setParent(this);
+    headstageClampThread.setParent(this);
+
+    /* Initializing State Flow/Logic Variables
+     * Each state should return an integer when it reaches an exit point.
+     * The following cases describe the significance of the integer
+     * -1= Error.  This means the state finished without reaching a decision like if it was interrupted during execution
+     * 0 = Go to the state listed at position "0" index nextStates vector in State.  (ERROR STATE)  Lots of states don't use it a all
+     * 1 = Go to the state listed at position "1" index nextStates vector in State.  (NEXT STATE, OPTION 1)
+     * etc.
+     *
+     * I should probably write a GUI selector for this so that people can pick and choose which states to use
+     * and when to switch between them live.  It will make debugging a lot harder depending on which route
+     * the user makes the state machine go so reproducing errors will be tricky since the flow of the code
+     * is changing life as the user uses it.  It should probably have a log file to trace the code flow and
+     * help with debugging.
+     *
+     * Each state will need to declare how many decision options there are within it's code and also define
+     * what logic it is using to decide betwen each state.  That way, the GUI can show the user what the state
+     * is thinking when it chooses decision 1, 2, etc.
+
+*/
+switch (4)
+{
+case 0:  // Actual state order
+    hardwareInitState       .setNextStates(QVector<State*>() << &errorState << &loadPipettesState);
+    loadPipettesState       .setNextStates(QVector<State*>() << &errorState << &hardwareCalibState);
+    hardwareCalibState      .setNextStates(QVector<State*>() << &errorState << &getPipetteState);
+    getPipetteState         .setNextStates(QVector<State*>() << &errorState << &trialInitState);
+    trialInitState          .setNextStates(QVector<State*>() << &errorState << &setBrainHeightState << &pipetteQCState);
+    setBrainHeightState     .setNextStates(QVector<State*>() << &errorState << &pipetteQCState);
+    pipetteQCState          .setNextStates(QVector<State*>() << &errorState << &clogCheckState      << &retractState);
+    clogCheckState          .setNextStates(QVector<State*>() << &errorState << &neuronHuntState     << &retractState);
+    neuronHuntState         .setNextStates(QVector<State*>() << &errorState << &gigasealState       << &retractState);
+    gigasealState           .setNextStates(QVector<State*>() << &errorState << &breakInState        << &neuronHuntState << &retractState << &cellQCState);
+    breakInState            .setNextStates(QVector<State*>() << &errorState << &cellQCState         << &retractState);
+    cellQCState             .setNextStates(QVector<State*>() << &errorState << &breakInState        << &recordState         << &retractState);
+    recordState             .setNextStates(QVector<State*>() << &errorState << &retractSlowlyState  << &retractState);
+    retractState            .setNextStates(QVector<State*>() << &errorState << &removePipetteState);
+    retractSlowlyState      .setNextStates(QVector<State*>() << &errorState << &removePipetteState);
+    removePipetteState      .setNextStates(QVector<State*>() << &errorState << &getPipetteState);
+    break;
+
+case 1: // Just loads a pipette
+    hardwareInitState       .setNextStates(QVector<State*>() << &errorState << &loadPipettesState);
+    loadPipettesState       .setNextStates(QVector<State*>() << &errorState << &hardwareCalibState);
+    hardwareCalibState      .setNextStates(QVector<State*>() << &errorState << &getPipetteState);
+    getPipetteState         .setNextStates(QVector<State*>() << &errorState << NULL);
+    break;
+
+case 2:  // Cycles through pipettes for the video
+    hardwareInitState       .setNextStates(QVector<State*>() << &errorState << &loadPipettesState);
+    loadPipettesState       .setNextStates(QVector<State*>() << &errorState << &hardwareCalibState);
+    hardwareCalibState      .setNextStates(QVector<State*>() << &errorState << &getPipetteState);
+    getPipetteState         .setNextStates(QVector<State*>() << &errorState << &retractState);
+    retractState            .setNextStates(QVector<State*>() << &errorState << &errorState);
+    removePipetteState      .setNextStates(QVector<State*>() << &errorState << &getPipetteState);
+    break;
+
+case 3: // Testing resistance check code (skipping load pipettes, calib, get pipettes, retract etc.
+        // This case leaves the pipette in the holder and just does resistance checks, neuron hunt, etc.
+        // I should probably inclulde the option to switch to the spare headstage to make this easier to
+        // debug.  The THOR motor needs to be homed using the APT User software before running this
+    hardwareInitState       .setNextStates(QVector<State*>() << &errorState << &trialInitState);
+    trialInitState          .setNextStates(QVector<State*>() << &errorState << &setBrainHeightState << &pipetteQCState);
+    setBrainHeightState     .setNextStates(QVector<State*>() << &errorState << &pipetteQCState);
+    pipetteQCState          .setNextStates(QVector<State*>() << &errorState << &clogCheckState      << &retractState);
+    clogCheckState          .setNextStates(QVector<State*>() << &errorState << &neuronHuntState     << &retractState);
+    neuronHuntState         .setNextStates(QVector<State*>() << &errorState << &gigasealState       << &retractState);
+    gigasealState           .setNextStates(QVector<State*>() << &errorState << &breakInState        << &neuronHuntState << &retractState);
+    breakInState            .setNextStates(QVector<State*>() << &errorState << &cellQCState         << &retractState);
+
+    break;
+
+case 4:
+    hardwareInitState       .setNextStates(QVector<State*>() << &errorState << &trialInitState);
+    trialInitState          .setNextStates(QVector<State*>() << &errorState << &breakInState << &pipetteQCState);
+    breakInState            .setNextStates(QVector<State*>() << &errorState << &cellQCState  << &retractState);
+    cellQCState             .setNextStates(QVector<State*>() << &errorState << &recordState  << &retractState);
+    break;
+
+}
+    stateRunning = 0;
+    currentState = NULL;
+
+    // Just a list of all states in no particular order (this is used by setHardwareVals())
+    allStates = QVector<State*>() << &hardwareInitState
+                                  << &loadPipettesState
+                                  << &hardwareCalibState
+                                  << &getPipetteState
+                                  << &setBrainHeightState
+                                  << &trialInitState
+                                  << &pipetteQCState
+                                  << &clogCheckState
+                                  << &neuronHuntState
+                                  << &gigasealState
+                                  << &breakInState
+                                  << &cellQCState
+                                  << &recordState
+                                  << &retractState
+                                  << &retractSlowlyState
+                                  << &removePipetteState;
+
+    hwSettingsChanged();  // Initializing the states with the default hardware settings in the hardware window
+
+    // If these values change with each time the state is run, add them to the "connectState" function
+    updateStateValues();
+
+    initTimer.setSingleShot(true);
+    connect(&initTimer,SIGNAL(timeout()),this,SLOT(init()),Qt::QueuedConnection);
+    initTimer.start(1000);  // this will call init();
+}
+
+MainWindow::~MainWindow()
+{
+//    emit stopVstim();
+    if(stateRunning && currentState != NULL) AP_Data = currentState->getData();
+    if(AP_Data.trialSaved == 0)
+    {        
+        AP_Data.saveSettings();
+        AP_Data.saveLog();
+    }
+    savePreferences();
+    connect(this,SIGNAL(daq_stopTask()),daq,SLOT(stopTask()),Qt::QueuedConnection);
+    emit daq_stopTask();
+//    connect(this,SIGNAL(autopatcher_stop()),autopatcher,SLOT(stop()),Qt::QueuedConnection);
+//    emit autopatcher_stop();
+//    connect(this,SIGNAL(filler_stop()),filler,SLOT(stop()),Qt::QueuedConnection);
+//    emit filler_stop();
+//    connect(this,SIGNAL(headstageClamp_stop()),headstageClamp,SLOT(stop()),Qt::QueuedConnection);
+//    emit headstageClamp_stop();
+//    connect(this,SIGNAL(scara_stop()),scara,SLOT(stop()),Qt::QueuedConnection);
+//    emit scara_stop();
+
+    QThread::msleep(500);
+
+    autopatcherThread.quit();
+    headstageClampThread.quit();
+    fillerThread.quit();
+    scaraThread.quit();
+    daqThread.quit();
+    multiclampThread.quit();
+    tMotorThread.quit();
+
+    autopatcherThread.wait(3000);
+    headstageClampThread.wait(3000);
+    fillerThread.wait(3000);
+    scaraThread.wait(3000);
+    daqThread.wait(3000);
+    multiclampThread.wait(3000);
+    tMotorThread.wait(3000);
+
+    qWarning() << autopatcherThread.isFinished();
+    qWarning() << headstageClampThread.isFinished();
+    qWarning() << fillerThread.isFinished();
+    qWarning() << scaraThread.isFinished();
+    qWarning() << daqThread.isFinished();
+    qWarning() << multiclampThread.isFinished();
+    qWarning() << tMotorThread.isFinished();
+
+    // Deleting the hardware workers (this should close the serial
+    // ports etc. when their destructors are called)
+    delete autopatcher;
+    delete headstageClamp;
+    delete scara;
+    delete filler;
+    delete tMotor;
+    delete multiclamp;
+    delete daq;
+    delete ui;
+
+    ap_win->close();
+    brkRampSettings->close();
+    brkSuckSettings->close();
+    brkZapSettings->close();
+    hw_win->close();
+    pref_win->close();
+    delete brkZapSettings;
+    delete brkSuckSettings;
+    delete brkRampSettings;
+    delete ap_win;
+}
+
+
+void MainWindow::init()
+{
+    // ###########################################################################################
+    // STEP 1  Setup
+    // ###########################################################################################
+
+    AP_Data.clearLogValues();
+
+    // Hardware Workers (don't assign parents so that they can be moved to another thread)
+    autopatcher     = new AutopatcherWorker();
+    headstageClamp  = new HeadstageClampWorker();
+    scara           = new SCARAWorker();
+    filler          = new FillerWorker();
+    multiclamp      = new MulticlampWorker();
+    daq             = new DAQWorker();
+    tMotor          = new ThorWorker();  // ActiveX Controls are slow to initialize
+                                // (that's why we let the GUI loop run first)
+
+    autopatcher->   moveToThread(&autopatcherThread);
+    headstageClamp->moveToThread(&headstageClampThread);
+    scara->         moveToThread(&scaraThread);
+    filler->        moveToThread(&fillerThread);
+    tMotor->        moveToThread(&tMotorThread);
+    multiclamp->    moveToThread(&multiclampThread);
+    daq->           moveToThread(&daqThread);
+
+    // Setting up threads
+    autopatcherThread.start(QThread::TimeCriticalPriority);
+    daqThread.start(QThread::TimeCriticalPriority);
+    scaraThread.start();
+    fillerThread.start();
+    headstageClampThread.start();
+    multiclampThread.start(QThread::TimeCriticalPriority);
+    tMotorThread.start();
+
+    // ************************************
+    // ********* Setup Hardware ***********
+    // ************************************
+    connect(this,SIGNAL(initDAQInThread()),daq,SLOT(initInThread()),Qt::QueuedConnection);
+    emit initDAQInThread();
+    daq->setAmplifierScaleVC(multiclamp->getCommandScale());  // is this necessary?
+
+    // ************************************
+    // ************ Setup Plots ***********
+    // ************************************
+    plotInit();
+    ui->pages->setEnabled(true);
+    busy_stop("You may edit the settings in drop down menu or click GO to initialize the hardware connections.");
+}
+
+void MainWindow::startStateMachine()
+{
+    // On program startup
+    stateRunning = 1;
+    currentState = &hardwareInitState;
+    connectState(currentState);    
+    currentState->setData(AP_Data);
+    //updateStateValues();
+    currentState->firstRun();
+    qWarning() << "State started: " << currentState->getName();
+}
+
+void MainWindow::stateFinished()
+{    
+    ui->pages->setEnabled(false);
+    disconnectState(currentState);
+    stateRunning = 0;
+    qWarning() << "State finished: " << currentState->getName();
+
+    if(currentState->decision != -1)
+    {
+        if((currentState->getNextStates()[currentState->decision] != NULL) &&
+            (currentState->getNextStates()[currentState->decision] != &errorState) &&
+             (currentState->decision < currentState->getNextStates().size()))
+        {
+            stateRunning = 1;
+            AP_Data = currentState->getData();
+            currentState = currentState->getNextStates()[currentState->decision];
+            connectState(currentState);
+            currentState->setData(AP_Data);
+            qWarning() << "State starting: " << currentState->getName();
+            currentState->firstRun();
+        }
+        else
+        {
+            qWarning() << "State machine stopped.  NULL state, error state, or bad decision value from a state.";
+        }
+        ui->pages->setEnabled(true);
+    }
+    else
+    {
+        qWarning() << "ERROR!!!  STATE FINISHED WITH A CODE -1. Something is wrong with the state code.";
+        // WHAT TO DO WITH THE DATA?
+    }
+}
+
+void MainWindow::updateStateValues()
+{
+    // Call this function whenever the values in AP_Data change
+    // to propagates them down into the states
+    pipetteQCState.setHeadstageNum(AP_Data.headstageNum);
+    pipetteQCState.setNumAve(AP_Data.numAve);
+
+}
+
+void MainWindow::updateWorkerValues()
+{
+    daq->setNPeriods(AP_Data.nPeriods);
+}
+
+void MainWindow::connectState(State * state)
+{
+    // GUI Signals
+    connect(state,SIGNAL(stateFinished())                           ,this,SLOT(stateFinished())                             ,Qt::QueuedConnection);
+    connect(state,SIGNAL(gui_busy_start(QString))                   ,this,SLOT(busy_start(QString))                         ,Qt::QueuedConnection);
+    connect(state,SIGNAL(gui_busy_stop(QString))                    ,this,SLOT(busy_stop(QString))                          ,Qt::QueuedConnection);
+    connect(state,SIGNAL(gui_busy_stop_error(QString))              ,this,SLOT(busy_stop_error(QString))                    ,Qt::QueuedConnection);
+    connect(state,SIGNAL(gui_setCurrentPageIndex(int))              ,this,SLOT(setCurrentPageIndex(int))                    ,Qt::QueuedConnection);
+    connect(state,SIGNAL(gui_setCurrentPageIndex(QString))          ,this,SLOT(setCurrentPageIndex(QString))                ,Qt::QueuedConnection);
+    connect(state,SIGNAL(gui_enablePages(bool))                     ,this,SLOT(enablePages(bool))                           ,Qt::QueuedConnection);
+    connect(state,SIGNAL(gui_setTextStatus(QString))                ,this,SLOT(setTextStatus(QString))                      ,Qt::QueuedConnection);
+    connect(state,SIGNAL(gui_clearResistancePlot())                 ,this,SLOT(clearResistancePlot())                       ,Qt::QueuedConnection);
+    connect(state,SIGNAL(gui_clearRawDataPlot())                    ,this,SLOT(clearRawDataPlot())                          ,Qt::QueuedConnection);
+    connect(state,SIGNAL(gui_clearMemTestPlot())                    ,this,SLOT(clearMemTestPlot())                          ,Qt::QueuedConnection);
+    connect(state,SIGNAL(gui_enableActionFillPipette(bool))         ,ui->actionFill_Pipette,SLOT(setEnabled(bool))          ,Qt::QueuedConnection);
+    connect(state,SIGNAL(gui_enableActionResetCarousel(bool))       ,ui->actionReset_Carousel,SLOT(setEnabled(bool))        ,Qt::QueuedConnection);
+    connect(state,SIGNAL(gui_enableActionLoadMicrofil(bool))        ,ui->actionLoad_microfil_20uL,SLOT(setEnabled(bool))    ,Qt::QueuedConnection);
+    connect(state,SIGNAL(gui_enableActionOpenHeadstageClamp(bool))  ,ui->actionOpen_Headstage_Clamp,SLOT(setEnabled(bool))  ,Qt::QueuedConnection);
+    connect(state,SIGNAL(gui_enableActionRetractHeadstageWire(bool)),ui->actionRetract_Headstage_Wire,SLOT(setEnabled(bool)),Qt::QueuedConnection);
+    connect(state,SIGNAL(gui_enableActionHomeThorlabsMotor(bool))   ,ui->actionHome_Thorlabs_Motor,SLOT(setEnabled(bool))   ,Qt::QueuedConnection);
+    connect(state,SIGNAL(gui_pauseButtonEnable(bool))               ,ui->pushButtonPause,SLOT(setEnabled(bool))             ,Qt::QueuedConnection);
+    connect(state,SIGNAL(gui_pauseButtonVisible(bool))              ,ui->pushButtonPause,SLOT(setVisible(bool))             ,Qt::QueuedConnection);
+    connect(state,SIGNAL(gui_plotResData(double))                   ,this,SLOT(plotResData(double))                         ,Qt::QueuedConnection);
+    connect(state,SIGNAL(gui_updateCurrentPosition())               ,this,SLOT(updateCurrentPosition())                     ,Qt::QueuedConnection);
+    connect(state,SIGNAL(gui_incrementTrialNumber())                ,this,SLOT(incrementTrialNumber())                      ,Qt::QueuedConnection);
+    connect(state,SIGNAL(gui_updateMembraneTestValues(QVector<double>)),this,SLOT(updateMemTestVals(QVector<double>))       ,Qt::QueuedConnection);
+    connect(state,SIGNAL(gui_enablePushButtonUpAdjust(bool))        ,ui->pushButtonUpAdjust,SLOT(setEnabled(bool))          ,Qt::QueuedConnection);
+    connect(state,SIGNAL(gui_enablePushButtonDownAdjust(bool))      ,ui->pushButtonDownAdjust,SLOT(setEnabled(bool))        ,Qt::QueuedConnection);
+    connect(state,SIGNAL(gui_enablePushButtonGO3(bool))             ,ui->pushButtonGo3,SLOT(setEnabled(bool))               ,Qt::QueuedConnection);
+
+    // Autopatcher Signals
+    connect(state,SIGNAL(autopatcher_init(QString))                      ,autopatcher,SLOT(init(QString))                   ,Qt::QueuedConnection);
+    connect(state,SIGNAL(autopatcher_switchBNC(bool, bool))              ,autopatcher,SLOT(switchBNC(bool,bool))            ,Qt::QueuedConnection);
+    connect(state,SIGNAL(autopatcher_softwarePressure(bool,bool))        ,autopatcher,SLOT(softwarePressure(bool,bool))     ,Qt::QueuedConnection);
+    connect(state,SIGNAL(autopatcher_switchPressure(int,bool))           ,autopatcher,SLOT(switchPressure(int,bool))        ,Qt::QueuedConnection);
+    connect(state,SIGNAL(autopatcher_setPressure(int, double, bool))     ,autopatcher,SLOT(setPressure(int, double, bool))  ,Qt::QueuedConnection);
+    connect(state,SIGNAL(autopatcher_breakIn(int,int,int))               ,autopatcher,SLOT(breakIn(int,int,int))            ,Qt::QueuedConnection);
+    connect(state,SIGNAL(autopatcher_breakInRamp(int, int))              ,autopatcher,SLOT(breakInRamp(int, int))           ,Qt::QueuedConnection);
+    connect(state,SIGNAL(autopatcher_breakInRampFeedback(int))           ,autopatcher,SLOT(breakInRampFeedback(int))        ,Qt::QueuedConnection);
+    connect(state,SIGNAL(autopatcher_stopRamp())                         ,autopatcher,SLOT(stopRamp())                      ,Qt::QueuedConnection);
+
+    // Headstage Clamp Signals
+    connect(state,SIGNAL(headstageClamp_init(QString))    ,headstageClamp,SLOT(init(QString))                   ,Qt::QueuedConnection);
+    connect(state,SIGNAL(headstageClamp_openClamp(bool))  ,headstageClamp,SLOT(openClamp(bool))       ,Qt::QueuedConnection);
+    connect(state,SIGNAL(headstageClamp_halfClamp(bool))  ,headstageClamp,SLOT(halfClamp(bool))       ,Qt::QueuedConnection);
+    connect(state,SIGNAL(headstageClamp_closeClamp(bool)) ,headstageClamp,SLOT(closeClamp(bool))      ,Qt::QueuedConnection);
+    connect(state,SIGNAL(headstageClamp_threadWire(bool)) ,headstageClamp,SLOT(threadWire(bool))      ,Qt::QueuedConnection);
+    connect(state,SIGNAL(headstageClamp_retractWire(bool)),headstageClamp,SLOT(retractWire(bool))     ,Qt::QueuedConnection);
+
+
+    // SCARA Signals
+    connect(state,SIGNAL(scara_init(QString))                   ,scara,SLOT(init(QString))                  ,Qt::QueuedConnection);
+    connect(state,SIGNAL(scara_rotateCarouselNext(bool))        ,scara,SLOT(carouselNextPipette(bool))      ,Qt::QueuedConnection);
+    connect(state,SIGNAL(scara_calibrate())                     ,scara,SLOT(calibrate())                    ,Qt::QueuedConnection);
+    connect(state,SIGNAL(scara_rotateArm(int,bool,int))         ,scara,SLOT(rotateArm(int,bool,int))        ,Qt::QueuedConnection);
+    connect(state,SIGNAL(scara_enableEndEffector(bool,bool))    ,scara,SLOT(enableEndEffector(bool,bool))   ,Qt::QueuedConnection);
+    connect(state,SIGNAL(scara_openEndEffector(bool))           ,scara,SLOT(openEndEffector(bool))          ,Qt::QueuedConnection);
+    connect(state,SIGNAL(scara_partialCloseEndEffector(bool))   ,scara,SLOT(partialCloseEndEffector(bool))  ,Qt::QueuedConnection);
+    connect(state,SIGNAL(scara_closeEndEffector(bool))          ,scara,SLOT(closeEndEffector(bool))         ,Qt::QueuedConnection);
+    connect(state,SIGNAL(scara_moveNext(bool))                  ,scara,SLOT(moveNext(bool))                 ,Qt::QueuedConnection);
+    connect(state,SIGNAL(scara_fill1(bool))                     ,scara,SLOT(fill1(bool))                    ,Qt::QueuedConnection);
+    connect(state,SIGNAL(scara_fill2(bool))                     ,scara,SLOT(fill2(bool))                    ,Qt::QueuedConnection);
+    connect(state,SIGNAL(scara_fill3(bool))                     ,scara,SLOT(fill3(bool))                    ,Qt::QueuedConnection);
+    connect(state,SIGNAL(scara_dispenseHighPressure(int,bool))  ,scara,SLOT(dispenseHighPressure(int,bool)) ,Qt::QueuedConnection);
+    connect(state,SIGNAL(scara_powerDown())                     ,scara,SLOT(powerDown())                    ,Qt::QueuedConnection);
+
+    // Filler Signals
+    connect(state,SIGNAL(filler_init(QString))                   ,filler,SLOT(init(QString))                   ,Qt::QueuedConnection);
+    connect(state,SIGNAL(filler_aspirateVolume(float,bool))      ,filler,SLOT(aspirateVolume(float,bool))      ,Qt::QueuedConnection);
+    connect(state,SIGNAL(filler_dispenseVolume(float,bool))      ,filler,SLOT(dispenseVolume(float,bool))      ,Qt::QueuedConnection);
+    connect(state,SIGNAL(filler_enablePressureControl(bool,bool)),filler,SLOT(enablePressureControl(bool,bool)),Qt::QueuedConnection);
+
+    // Thor Labs Motor Signals
+    connect(state,SIGNAL(thorLabsMotor_init(int))          ,tMotor,SLOT(init(int))                  ,Qt::DirectConnection);
+    connect(state,SIGNAL(thorLabsMotor_calibrate())        ,tMotor,SLOT(calibrate())                ,Qt::QueuedConnection);
+    connect(state,SIGNAL(thorLabsMotor_moveToAbsolute(float,float)) ,tMotor,SLOT(moveMotorAbsolute(float,float)) ,Qt::QueuedConnection);
+    connect(state,SIGNAL(thorLabsMotor_moveByRelative(float,float)) ,tMotor,SLOT(moveMotorRelative(float,float)) ,Qt::QueuedConnection);
+    connect(state,SIGNAL(thorLabsMotor_getPosition(bool)) ,tMotor,SLOT(getPosition(bool))                      ,Qt::QueuedConnection);
+
+    // Multiclamp Signals
+    connect(state,SIGNAL(multiclamp_init(int, QString))             ,multiclamp,SLOT(init(int, QString))                    ,Qt::QueuedConnection);
+    connect(state,SIGNAL(multiclamp_selectChannel(int))             ,multiclamp,SLOT(selectChannel(int))                    ,Qt::QueuedConnection);
+    connect(state,SIGNAL(multiclamp_setMode(int))                   ,multiclamp,SLOT(setMode(int))                          ,Qt::QueuedConnection);
+    connect(state,SIGNAL(multiclamp_setHoldingVSafe(double,bool))   ,multiclamp,SLOT(setHoldingVoltageSafe(double,bool))    ,Qt::QueuedConnection);
+    connect(state,SIGNAL(multiclamp_setHoldingVRaw(double))         ,multiclamp,SLOT(setHoldingVoltageRaw(double))          ,Qt::QueuedConnection);
+    connect(state,SIGNAL(multiclamp_setHoldingISafe(double,bool))   ,multiclamp,SLOT(setHoldingVoltageSafe(double,bool))    ,Qt::QueuedConnection);
+    connect(state,SIGNAL(multiclamp_setHoldingIRaw(double))         ,multiclamp,SLOT(setHoldingCurrentRaw(double))          ,Qt::QueuedConnection);
+    connect(state,SIGNAL(multiclamp_setHoldingVChecked(bool))       ,multiclamp,SLOT(setHoldingVoltageChecked(bool))        ,Qt::QueuedConnection);
+    connect(state,SIGNAL(multiclamp_setHoldingIChecked(bool))       ,multiclamp,SLOT(setHoldingCurrentChecked(bool))        ,Qt::QueuedConnection);
+    connect(state,SIGNAL(multiclamp_autoPipetteOffset())            ,multiclamp,SLOT(autoCorrectOffset())                   ,Qt::QueuedConnection);
+    connect(state,SIGNAL(multiclamp_autoFastCapacitance())          ,multiclamp,SLOT(autoFastCapacitance())                 ,Qt::QueuedConnection);
+    connect(state,SIGNAL(multiclamp_autoSlowCapacitance())          ,multiclamp,SLOT(autoSlowCapacitance())                 ,Qt::QueuedConnection);
+    connect(state,SIGNAL(multiclamp_getFastCapacitanceValue(double*)),multiclamp,SLOT(getFastCapacitanceValue(double*))     ,Qt::QueuedConnection);
+    connect(state,SIGNAL(multiclamp_enablePipetteCapacitanceCompensation(bool)),multiclamp,SLOT(enablePipetteCapacitanceCompensation(bool))     ,Qt::QueuedConnection);
+    connect(state,SIGNAL(multiclamp_setPipetteCapacitanceCompensation(double)),multiclamp,SLOT(setPipetteCapacitanceCompensation(double))     ,Qt::QueuedConnection);
+    connect(state,SIGNAL(multiclamp_setFastCapacitanceValue(double)),multiclamp,SLOT(setFastCapacitanceValue(double)),Qt::QueuedConnection);
+    connect(state,SIGNAL(multiclamp_autoBridgeBalance())            ,multiclamp,SLOT(autoBridgeBalance())                   ,Qt::QueuedConnection);
+
+    // DAQ Signals
+    connect(state,SIGNAL(daq_init(QString))     ,daq,SLOT(init(QString))        ,Qt::QueuedConnection);
+    connect(state,SIGNAL(daq_initTask(int))     ,daq,SLOT(initTask(int))        ,Qt::QueuedConnection);
+    connect(state,SIGNAL(daq_startTask())       ,daq,SLOT(startTask())          ,Qt::QueuedConnection);
+    connect(state,SIGNAL(daq_stopTask())        ,daq,SLOT(stopTask())           ,Qt::QueuedConnection);
+    connect(state,SIGNAL(daq_getTaskRunning())  ,daq,SLOT(getTaskRunning())     ,Qt::QueuedConnection);
+    connect(state,SIGNAL(daq_trigger())         ,daq,SLOT(trigger())            ,Qt::QueuedConnection);
+
+
+    // SLOTS
+    connect(ui->pushButtonPause,SIGNAL(toggled(bool))   ,state,SLOT(pauseState(bool))   ,Qt::QueuedConnection);
+
+    // Autopatcher Slots
+    connect(autopatcher,SIGNAL(initReady())             ,state,SLOT(autopatcher_initReady())        ,Qt::QueuedConnection);
+    connect(autopatcher,SIGNAL(initError())             ,state,SLOT(autopatcher_initError())        ,Qt::QueuedConnection);
+    connect(autopatcher,SIGNAL(breakInFinished())       ,state,SLOT(autopatcher_breakInComplete())  ,Qt::QueuedConnection);
+
+    // Headstage Clamp Slots
+    connect(headstageClamp,SIGNAL(initReady())          ,state,SLOT(headstageClamp_initReady())         ,Qt::QueuedConnection);
+    connect(headstageClamp,SIGNAL(initError())          ,state,SLOT(headstageClamp_initError())         ,Qt::QueuedConnection);
+    connect(headstageClamp,SIGNAL(commandFinished())    ,state,SLOT(headstageClamp_commandFinished())   ,Qt::QueuedConnection);
+
+    // SCARA Slots
+    connect(scara,SIGNAL(initReady())       ,state,SLOT(scara_initReady())          ,Qt::QueuedConnection);
+    connect(scara,SIGNAL(initError())       ,state,SLOT(scara_initError())          ,Qt::QueuedConnection);
+    connect(scara,SIGNAL(calibFinished())   ,state,SLOT(scara_calibrateFinished())  ,Qt::QueuedConnection);
+    connect(scara,SIGNAL(commandFinished()) ,state,SLOT(scara_commandFinished())    ,Qt::QueuedConnection);
+
+    // Filler Slots
+    connect(filler,SIGNAL(initReady())      ,state,SLOT(filler_initReady())         ,Qt::QueuedConnection);
+    connect(filler,SIGNAL(initError())      ,state,SLOT(filler_initError())         ,Qt::QueuedConnection);
+    connect(filler,SIGNAL(commandFinished()),state,SLOT(filler_commandFinished())   ,Qt::QueuedConnection);
+
+    // Thor Labs Motor Slots
+    connect(tMotor,SIGNAL(initReady())                  ,state,SLOT(thorLabsMotor_initReady())              ,Qt::QueuedConnection);
+    connect(tMotor,SIGNAL(initError())                  ,state,SLOT(thorLabsMotor_initError())              ,Qt::QueuedConnection);
+    connect(tMotor,SIGNAL(calibFinished())              ,state,SLOT(thorLabsMotor_calibrateFinished())      ,Qt::QueuedConnection);
+    connect(tMotor,SIGNAL(moveMotorFinished())          ,state,SLOT(thorLabsMotor_moveComplete())           ,Qt::QueuedConnection);
+    connect(tMotor,SIGNAL(currentMotorPosition(float))  ,state,SLOT(thorLabsMotor_currentMotorPosition(float))   ,Qt::QueuedConnection);
+
+    // Multiclamp Slots
+    connect(multiclamp,SIGNAL(initReady())          ,state,SLOT(multiclamp_initReady())                     ,Qt::QueuedConnection);
+    connect(multiclamp,SIGNAL(initError())          ,state,SLOT(multiclamp_initError())                     ,Qt::QueuedConnection);
+    connect(multiclamp,SIGNAL(autoOffsetComplete()) ,state,SLOT(multiclamp_autoPipetteOffsetComplete())     ,Qt::QueuedConnection);
+    connect(multiclamp,SIGNAL(setHoldingVoltageSafeComplete()) ,state,SLOT(multiclamp_setHoldingVoltageSafeComplete())     ,Qt::QueuedConnection);
+    connect(multiclamp,SIGNAL(setHoldingCurrentSafeComplete()) ,state,SLOT(multiclamp_setHoldingCurrentSafeComplete())     ,Qt::QueuedConnection);
+
+    // DAQ Slots
+    qRegisterMetaType< QVector<double> >("QVector<double>");
+    connect(daq,SIGNAL(initReady())                     ,state,SLOT(daq_initReady())                        ,Qt::QueuedConnection);
+    connect(daq,SIGNAL(initError())                     ,state,SLOT(daq_initError())                        ,Qt::QueuedConnection);
+    connect(daq,SIGNAL(initTaskReady())                 ,state,SLOT(daq_initTaskReady())                    ,Qt::QueuedConnection);
+    connect(daq,SIGNAL(initTaskError())                 ,state,SLOT(daq_initTaskError())                    ,Qt::QueuedConnection);
+
+    connect(daq,SIGNAL(memTestValsReady(QVector<double>)),state,SLOT(daq_memTestValsReady(QVector<double>)) ,Qt::QueuedConnection);
+    connect(daq,SIGNAL(resDataReady(double))            ,state,SLOT(daq_resDataReady(double))               ,Qt::QueuedConnection);
+    connect(daq,SIGNAL(taskIsRunning(int))              ,state,SLOT(daq_taskRunning(int))               ,Qt::QueuedConnection);
+    connect(daq,SIGNAL(rawDataReady(QVector<double>))   ,state,SLOT(daq_rawDataReady(QVector<double>))  ,Qt::QueuedConnection);
+
+    // OTHER SIGNALS THAT HAVE TO BE REESTABLISHED BECAUSE EVERYTHING GETS DISCONNECTED IN THE "disconnectState" function
+    // ADD ANY OTHER SIGNALS TO THAT FUNCTION THAT DON'T GO THROUGH State.h AND CONNECT BETWEEEN ANYTHING ELSE AND THE WORKERS.
+}
+
+void MainWindow::disconnectState(State *state)
+{
+    state->disconnect();
+    autopatcher->disconnect();
+    headstageClamp->disconnect();
+    scara->disconnect();
+    filler->disconnect();
+    tMotor->disconnect();
+    multiclamp->disconnect();
+    daq->disconnect();
+
+    // This is not a state connection but to use the "disconnect" function, I have to restablish the connection with every other signal.
+    connect(daq,SIGNAL(rawDataReady()),this,SLOT(rawDataReadySlot()),Qt::QueuedConnection);
+}
+
+void MainWindow::addStates(vector< vector<State*> > &table, State** states)
+{
+    table.push_back(vector<State*>(states,states+sizeof(states)/sizeof(State*)));
+}
+
+void MainWindow::pauseState(State *)
+{
+
+}
+
+void MainWindow::resumeState(State *)
+{
+
+}
+
+void MainWindow::busy_start(QString msg)
+{
+    if(!busy.isActive())
+    {
+        busy.start();
+    }
+    ui->textStatus->setText(msg);
+}
+
+void MainWindow::busy_stop(QString msg)
+{
+    busy.stop();
+    ui->textBusy->setText("✔");
+    ui->textStatus->setText(msg);
+}
+
+void MainWindow::busy_stop_error(QString msg)
+{
+    busy.stop();
+    ui->textBusy->setText("X");
+    ui->textStatus->setText(msg);
+}
+
+void MainWindow::setCurrentPageIndex(int i)
+{
+    ui->pages->setCurrentIndex(i);
+}
+
+void MainWindow::setCurrentPageIndex(QString pgObjName)
+{
+    for(int i=0; i<ui->pages->count(); i++)
+    {
+        if(ui->pages->widget(i)->objectName() == pgObjName)
+        {
+            ui->pages->setCurrentIndex(i);
+            break;
+        }
+    }
+}
+
+void MainWindow::enablePages(bool flag)
+{
+    ui->pages->setEnabled(flag);
+}
+
+void MainWindow::setTextStatus(QString msg)
+{
+    ui->textStatus->setText(msg);
+}
+
+void MainWindow::clearResistancePlot()
+{
+    ui->resistancePlot->graph(0)->clearData();;
+    resPlotData.clear();
+    ui->resistancePlot->replot();
+}
+
+void MainWindow::clearRawDataPlot()
+{
+    ui->rawPlot->graph(0)->clearData();
+    rawPlotData.clear();
+    ui->rawPlot->replot();
+}
+
+void MainWindow::clearMemTestPlot()
+{
+    ui->membraneTestPlot->graph(0)->clearData();
+    ui->membraneTestPlot->replot();
+}
+
+void MainWindow::enableActionFillPipette(bool flag)
+{
+    ui->actionFill_Pipette->setEnabled(flag);
+}
+
+void MainWindow::enableActionResetCarousel(bool flag)
+{
+    ui->actionReset_Carousel->setEnabled(flag);
+}
+
+void MainWindow::enableActionLoadMicrofil(bool flag)
+{
+    ui->actionLoad_microfil_20uL->setEnabled(flag);
+}
+
+void MainWindow::updateCurrentPosition()
+{
+    ui->label_CurrentPosition->setText(QString::number(tMotor->getPosition()*1000));
+}
+
+void MainWindow::guiInit()
+{
+    ui->setupUi(this);
+    QThread::currentThread()->setPriority(QThread::TimeCriticalPriority);
+    busy_start("Initializing...");
+    ui->pages->setCurrentIndex(0);
+    ui->pages->setEnabled(false);
+    ui->pushButtonGo1->setEnabled(true);
+    ui->pushButtonHALT->setVisible(false);
+    ui->actionFill_Pipette->setEnabled(false);    
+    ui->actionReset_Carousel->setEnabled(false);
+    ui->actionLoad_microfil_20uL->setEnabled(false);
+    ui->actionHome_Thorlabs_Motor->setEnabled(false);
+    ui->actionRetract_Headstage_Wire->setEnabled(false);
+    ui->actionOpen_Headstage_Clamp->setEnabled(false);
+
+    ui->checkBoxPauseOnRemoval->setVisible(false);
+    ui->pushButtonPause->setVisible(false);
+
+    imgLEDon    = QPixmap("../img/LED_on.png");
+    imgLEDoff   = QPixmap("../img/LED_off.png");
+//    imgScara    = QPixmap("../img/scara_adjust_view.png");
+//    ui->LED->setPixmap(imgLEDoff);
+//    ui->label_scara_adjust_view->setPixmap(imgScara);
+//    ui->label_scara_adjust_view->setScaledContents(true);
+
+    ap_win = new AutopatcherSettingsWindow();
+    connect(ap_win,SIGNAL(windowClosed()),this,SLOT(apSettingsChanged()),Qt::QueuedConnection);
+    AP_Data = ap_win->getVals();
+    AP_Data.setWindowTitle(this->windowTitle());
+    AP_Data.LOG_experimentDateTime.setDate(QDate::currentDate());
+
+    brkZapSettings = new BreakInSettingsZap();
+    connect(brkZapSettings,SIGNAL(windowClosed()),this,SLOT(breakInSettingsChangedZap()),Qt::QueuedConnection);
+
+    brkSuckSettings = new BreakInSettingsSuction();
+    connect(brkSuckSettings,SIGNAL(windowClosed()),this,SLOT(breakInSettingsChangedSuction()),Qt::QueuedConnection);
+
+    brkRampSettings = new BreakInSettingsRamp();
+    connect(brkRampSettings,SIGNAL(windowClosed()),this,SLOT(breakInSettingsChangedRamp()),Qt::QueuedConnection);
+
+    hw_win = new HardwareSettingsWindow();    
+    connect(hw_win,SIGNAL(windowClosed()),this,SLOT(hwSettingsChanged()),Qt::QueuedConnection);
+
+    pref_win = new Preferences();
+    connect(pref_win,SIGNAL(windowClosed()),this,SLOT(preferencesWindowClosed()),Qt::QueuedConnection);
+    loadPreferences();
+
+    // GUI VARIABLES
+    if(ui->radioButton->isChecked())   numStepsScaraAdjust      = ui->radioButton->text().split(QRegExp("([^0-9])+"))[0].toInt();
+    if(ui->radioButton_2->isChecked()) numStepsScaraAdjust      = ui->radioButton_2->text().split(QRegExp("([^0-9])+"))[0].toInt();
+    if(ui->radioButton_3->isChecked()) numStepsScaraAdjust      = ui->radioButton_3->text().split(QRegExp("([^0-9])+"))[0].toInt();
+    if(ui->radioButton_4->isChecked()) microfilFillVolumeAdjust = ui->radioButton_4->text().split(QRegExp("([^0-9])+"))[0].toInt();
+    if(ui->radioButton_5->isChecked()) microfilFillVolumeAdjust = ui->radioButton_5->text().split(QRegExp("([^0-9])+"))[0].toInt();
+    if(ui->radioButton_6->isChecked()) microfilFillVolumeAdjust = ui->radioButton_6->text().split(QRegExp("([^0-9])+"))[0].toInt();
+
+    if(ui->radioButton_7->isChecked())  pipetteAdjustDistance = ui->radioButton_7->text().split(QRegExp("([^0-9])+"))[0].toInt();
+    if(ui->radioButton_8->isChecked())  pipetteAdjustDistance = ui->radioButton_8->text().split(QRegExp("([^0-9])+"))[0].toInt();
+    if(ui->radioButton_9->isChecked())  pipetteAdjustDistance = ui->radioButton_9->text().split(QRegExp("([^0-9])+"))[0].toInt();
+    if(ui->radioButton_10->isChecked()) pipetteAdjustDistance = ui->radioButton_10->text().split(QRegExp("([^0-9])+"))[0].toInt();
+}
+
+void MainWindow::loadPreferences()
+{
+    // Name value pairs
+    QStringList names;
+    names << "data directory" << "experiment date" << "trial number" << "output file format";
+    QVector<bool> flags(names.size(),false);
+
+    QString trialNum;
+
+    qWarning() << "Loading preferences file";
+    ifstream fin;
+    QDir path = QStandardPaths::standardLocations(QStandardPaths::AppDataLocation).at(0) + "/" + this->windowTitle() + "/";
+    QString fullPath = path.path() + "/preferences.txt";
+    fin.open(fullPath.toStdString().c_str());
+    if(fin.is_open())
+    {
+
+        string str;
+        QString tmp;
+        int i(0);
+        while(getline(fin,str))
+        {
+            i++;
+            tmp = QString::fromStdString(str);
+            QString name  = tmp.split(QRegExp("(=)+"))[0];
+            QString value = tmp.split(QRegExp("(=)+"))[1];
+
+            int flag(0);
+            if     (name.contains(names[0],Qt::CaseInsensitive)){     flag = 1;}
+            else if(name.contains(names[1],Qt::CaseInsensitive)){    flag = 2;}
+            else if(name.contains(names[2],Qt::CaseInsensitive)){       flag = 3;}
+            else if(name.contains(names[3],Qt::CaseInsensitive)){ flag = 4;}
+            else flag = 0;
+
+            switch (flag)
+            {
+            case 1: // Data Directory
+            {
+                QDir tmp2(value);
+                if(tmp2.exists())
+                {
+                    pref_win->setDataDir(QDir(value));
+                    flags[1] = true;
+                }
+                else
+                {
+                    tmp2.mkpath(tmp2.path());
+                    pref_win->setDataDir(QDir(value));
+                    flags[1] = true;
+                }
+                break;
+            }
+            case 2:  // experiment date
+            {
+                QStringList tmp3 = value.split(QRegExp("(-)+"));
+                AP_Data.LOG_experimentDateTime.setDate(QDate(tmp3[0].toInt(),tmp3[1].toInt(),tmp3[2].toInt()));
+                if(AP_Data.LOG_experimentDateTime.date().isValid()) flags[2] = true;
+                else
+                break;
+            }
+            case 3: // trial number
+                // waiting to process the trial number until all the lines have been read. this is done in the error checking
+                // section next
+                trialNum = value;
+                break;
+
+            case 4: // Output file format
+            {
+                bool ok(0);
+                AP_Data.fileFormat = value.toInt(&ok);
+                pref_win->setFileFormat(value.toInt(&ok));
+                if(!ok) flags[4] = false;
+                else    flags[4] = true;
+                break;
+            }
+            case 0:
+            {
+                qWarning() << "Bad line in preferences file: " << QString::number(i);
+            }
+            }
+        }
+
+
+        fin.close();
+    }
+    else // If file wasn't opened
+    {
+        qWarning() << "Preferences file not opened.";
+    }
+
+    // Error checking
+    for(int i=0; i<flags.size(); i++)
+    {
+        if(!flags[i])
+        {
+            switch(i)
+            {
+            case 1:
+            {
+                qWarning() << "data directory error in preferences file.  Using default.";
+                QDir dataDir = QStandardPaths::standardLocations(QStandardPaths::HomeLocation).at(0) + "/" + this->windowTitle() + "/data/";
+                pref_win->setDataDir(dataDir);
+                if(!dataDir.exists()) dataDir.mkpath(dataDir.path());
+            }
+                break;
+            case 2:
+            {
+                qWarning() << "experiment date error in preferences file.  Using default.";
+                AP_Data.LOG_experimentDateTime.setDate(QDate::currentDate());
+                break;
+            }
+            case 3:
+            {
+                if(AP_Data.LOG_experimentDateTime.date() == QDate::currentDate())
+                {
+                    bool ok(0);
+                    AP_Data.trialNum = trialNum.toInt(&ok);
+                    if(!ok)
+                    {
+                        AP_Data.trialNum = 0;
+                    }
+                }
+                else  // new day, start the trial number from zero
+                {
+                    AP_Data.trialNum = 0;
+                }
+                break;
+            }
+            case 4:
+                AP_Data.fileFormat = 2;
+                pref_win->setFileFormat(AP_Data.fileFormat);
+                break;
+            }
+        }
+    }
+
+
+}
+
+void MainWindow::savePreferences()
+{
+    QDir path = QStandardPaths::standardLocations(QStandardPaths::AppDataLocation).at(0) + "/" + this->windowTitle() + "/";
+    if(!path.exists()) if(path.mkpath(path.path()));
+    QString fullPath = path.path() + "/preferences.txt";
+    qWarning() << "Saving preferences file." << fullPath;
+    ofstream fout;
+    fout.open(fullPath.toStdString().c_str());
+    if(fout.is_open())
+    {
+        fout << "data directory = "  << AP_Data.dataDir.path().toStdString() << "\n";
+        fout << "experiment date = " << QDate::currentDate().toString("yyyy-MM-dd").toStdString() << "\n";
+        fout << "output file format = " << AP_Data.fileFormat << "\n";
+        fout << "trial number = "    << QString::number(AP_Data.trialNum).toStdString() << "\n";;
+        fout.close();
+    }
+    else
+    {
+        qWarning() << "Preferences file could not be saved.";
+    }
+}
+
+void MainWindow::plotInit()
+{
+    rawPlotBuffSize = 5*daq->getSamplingRate();
+
+    ui->rawPlot->addGraph();
+    QPen my_pen = QPen(Qt::blue);
+    my_pen.setWidthF(0.5);
+    ui->rawPlot->graph(0)->setPen(my_pen);
+    ui->rawPlot->xAxis->setRange(0,rawPlotBuffSize);
+    ui->rawPlot->xAxis->setVisible(false);
+    ui->rawPlot->graph(0)->setAntialiased(false);
+    ui->rawPlot->setNoAntialiasingOnDrag(true);
+    ui->rawPlot->graph(0)->setAdaptiveSampling(true);
+
+    ui->resistancePlot->addGraph();
+    ui->resistancePlot->graph(0)->setScatterStyle(QCPScatterStyle(QCPScatterStyle::ssCircle, Qt::blue, Qt::white, 4));
+    ui->resistancePlot->graph(0)->setAntialiased(false);
+    ui->resistancePlot->graph(0)->setLineStyle(QCPGraph::lsNone);
+    ui->resistancePlot->replot();
+    ui->resistancePlot->xAxis->setVisible(false);
+    ui->resistancePlot->setNoAntialiasingOnDrag(true);
+    ui->resistancePlot->graph(0)->setAdaptiveSampling(true);
+
+    ui->membraneTestPlot->addGraph();
+    ui->membraneTestPlot->graph(0)->setPen(my_pen);
+    ui->membraneTestPlot->xAxis->setRange(0,100);
+    ui->membraneTestPlot->xAxis->setVisible(false);
+    ui->membraneTestPlot->graph(0)->setAntialiased(0);
+    ui->membraneTestPlot->setNoAntialiasingOnDrag(true);
+    ui->membraneTestPlot->graph(0)->setAdaptiveSampling(true);
+}
+
+// DAQ slots
+void MainWindow::rawDataReadySlot()
+{
+    daq->getRawData(&raw);
+    if(ui->pages->currentWidget()->objectName() == "page_autopatching")  plotRawData();  // this will plot "raw"
+    if(ui->pages->currentWidget()->objectName() == "page_cell_qc")  rawMemTestDataReady(raw);
+}
+
+
+void MainWindow::rawMemTestDataReady(QVector<double> buffer)
+{
+    QVector<double> keys(buffer.size());
+    for(int i=0; i<buffer.size(); i++)
+    {
+        keys[i] = i;
+    }
+    ui->membraneTestPlot->graph(0)->setData(keys,buffer);
+    ui->membraneTestPlot->yAxis->rescale();
+    ui->membraneTestPlot->replot();
+}
+
+
+
+
+// ************************************************************************************
+//          Resistance Ready Slot and Update Membrane Test Values
+//                  This is the main autopatcher algorithm
+// ************************************************************************************
+
+
+/*
+void MainWindow::resDataReadySlot(double res)
+{
+    AP_Data.resistanceValues.push_back(res);
+    bool save(0);
+//    qWarning() << "Mode: " << resistanceMeasureMode;
+    switch(resistanceMeasureMode)
+    {
+
+        case 0:  // ERROR CASE
+        {
+            qWarning() << "Resistance Measurement Mode ERROR!";
+            break;
+        }
+
+
+        case 1:  // Initial Resistance Check
+        {
+            int numRs = 20;
+            plotResData(res);
+            AP_Data.resVals.push_back(res);
+            AP_Data.LOG_pipetteCheckResVals.push_back(res);
+            AP_Data.resCounter++;
+
+            if(AP_Data.resVals.size() > 3)
+            {
+                int counter(0);
+                for(unsigned int i=0; i<AP_Data.resVals.size(); i++)
+                {
+                    if(abs(AP_Data.resVals[0]) > 5000)
+                    {
+                        counter++;
+                    }
+                }
+                if(counter > 2)
+                {
+                    QString msg = "No electrical connection to the ground wire.  Add ACSF or check the ground or the AgCl wires.  Changing the pipette... program will pause after changing.";
+                    qWarning() << msg;
+                    emit stopRCheck();
+                    emit changePipette();
+                    ui->lineEditDepth->setText("0");
+                    ui->pushButtonRestart->setEnabled(false);
+                    resistanceMeasureMode = 0;
+                    ui->textStatus->setText(msg);
+                    ui->checkBoxPauseOnRemoval->setChecked(true);
+                    AP_Data.resVals.clear();
+
+                    savePlot("resistanceCheck",ui->resistancePlot);
+                }
+            }
+            if(AP_Data.resCounter >= numRs && AP_Data.resVals.size() >= numRs) // Check 20 resistance measurements to check the variation and average
+            {
+                qWarning() << "Add code here to speed it up so it doesn't have to wait for all 20 samples. Also, add a regression calculation so that it can detect a slope reject that pipette.";
+
+                double tmp(0);
+                for(int i=0; i<numRs; i++)
+                {
+                    tmp += AP_Data.resVals[i];
+                }
+                double average = tmp/numRs;
+                AP_Data.LOG_resAboveBrainAve = average;
+
+                tmp = 0;
+                for(int i=0; i<numRs; i++)
+                {
+                    tmp += pow(AP_Data.resVals[i]-average,2);
+                }
+                double stdev = sqrt(tmp/numRs);
+
+                AP_Data.resCounter = 0;  // If this doesn't get executed, it could cause errrors in subsequent trials
+
+                AP_Data.resVals.clear();
+                qWarning() << "Resistance:  Average = " << average << " Stdev = " << stdev;
+                emit stopRCheck();
+                resistanceMeasureMode = -1; // Set to ignore any other resistance measurements that come from the DAQ worker.  This part has all the measurements it needs.
+
+                QString msg;
+                bool err(0);
+                if(average > AP_Data.maxR || average < AP_Data.minR)
+                {
+                    msg += "The average resistance of the pipette is " + QString::number(average) + "Mohms.  Please use a pipette with a resistance between " + QString::number(AP_Data.minR) + " and " + QString::number(AP_Data.maxR) + "Mohms.  The pipette will now be replaced.  ";
+                    err = 1;
+                }
+                if(stdev > AP_Data.maxVar)
+                {
+                    msg += "The standard deviation of the resistance of the pipette is " + QString::number(stdev) + "Mohms.  The pipette will now be replaced.  The variation is likely caused by particulates in the pipette." ;
+                    err = 1;
+                }
+
+                if(err)
+                {
+                    qWarning() << "Pipette is bad.  Changing pipette";
+                    emit stopRCheck();
+                    emit changePipette();
+                    ui->lineEditDepth->setText("0");
+                    ui->pushButtonRestart->setEnabled(false);
+                    resistanceMeasureMode = 0;
+                    ui->textStatus->setText(msg);
+                }
+                else
+                {
+                    // Pipette checks out.  Proceeding with patch attempt
+                    qWarning() << "Pipette checks out.  Descending...";
+                    emit stopRCheck();
+                    ui->textStatus->setText("Pipette descending into the brain.");
+                    AP_Data.pipetteUsed = 1;
+                    ui->lineEditDepth->setText(QString::number(AP_Data.startDepth));
+                    emit descendToDepth(AP_Data.startDepth);
+                }
+
+                savePlot("resistanceCheck",ui->resistancePlot);
+            }
+            break;
+        }
+
+
+        case 2:  // Clog Check at Depth
+        {
+            plotResData(res);
+            qWarning() << "Resistance at depth measured " << QString::number(res) << " position ";
+
+            AP_Data.resVals.push_back(res);
+            if(AP_Data.resVals.size() == 1)
+            {
+                if(abs(res-AP_Data.LOG_resAboveBrainAve) > AP_Data.clogThresh)
+                {
+                    qWarning() << "A problem was detected with the pipette.  Double checking... R = " << res << " R at surface = " << AP_Data.LOG_resAboveBrainAve;
+                    emit onePingOnlyVersaillies();
+                }
+                else
+                {
+                    // Continue and patch
+                    qWarning() << "Pipette not clogged";
+                    ui->textStatus->setText("Pipette not clogged.");
+                    QThread::sleep(1);
+                    resistanceMeasureMode = 3;
+                    ui->textStatus->setText("Hunting for neurons...");
+                    clearPlotResData();
+                    AP_Data.LOG_pipetteResValAtDepth = res;
+                    AP_Data.resVals.clear();
+                    emit onePingOnlyVersaillies();
+                }
+            }
+            else
+            {
+
+                if(AP_Data.resVals.size()>10)
+                {
+                    if(AP_Data.resVals[AP_Data.resVals.size()-1] - AP_Data.LOG_resAboveBrainAve > AP_Data.clogThresh)
+                    {
+                        // Changing the pipette
+                        emit stopRCheck();
+                        ui->textStatus->setText("Pipette is clogged.  R = " + QString::number(res) + " MOhms.  Changing pipette...");
+                        emit changePipette();
+                        ui->lineEditDepth->setText("0");
+                        AP_Data.resVals.clear();
+                        save = 1;
+
+                        ui->pushButtonRestart->setEnabled(false);
+                    }
+                    else if(AP_Data.resVals[AP_Data.resVals.size()-1] - AP_Data.LOG_resAboveBrainAve < AP_Data.clogThresh)
+                    {
+                        // Changing the pipette
+                        emit stopRCheck();
+                        ui->textStatus->setText("Pipette is broken or became unclogged.  R = " + QString::number(res) + " MOhms.  Changing pipette...");
+                        emit changePipette();
+                        ui->lineEditDepth->setText("0");
+                        AP_Data.resVals.clear();
+                        save = 1;
+
+                        ui->pushButtonRestart->setEnabled(false);
+                    }
+                    else
+                    {
+                        // Pipette seemed to recover, continuing to patch
+                        qWarning() << "Pipette seemed to recover R = " << res << " R at surface = " << AP_Data.LOG_resAboveBrainAve;;
+                        ui->textStatus->setText("Pipette not clogged.");
+                        QThread::sleep(1);
+                        resistanceMeasureMode = 3;
+                        ui->textStatus->setText("Hunting for neurons...");
+                        clearPlotResData();
+                        AP_Data.huntingFlag = 1;
+                        emit onePingOnlyVersaillies();
+                        AP_Data.LOG_pipetteResValAtDepth = res;
+                        AP_Data.resVals.clear();
+                    }
+                    AP_Data.LOG_pipetteResValAtDepth = res;
+                }
+                else
+                {
+                    emit onePingOnlyVersaillies();
+                }
+
+                // Continue to gigasealing if the resistance is greater than 80mohnms on descent
+                if(AP_Data.resVals[AP_Data.resVals.size()-1] > 80)
+                {
+                    qWarning() << "ADD CODE TO SKIP TO GIGASEALING.  HIGH RESISTANCE ON DESCENT >80Mohms";
+                }
+
+            }
+            break;
+        }
+
+
+        case 3:  // Neuron Hunting
+        {
+
+            plotResData(res);
+            AP_Data.resVals.push_back(res);
+            AP_Data.LOG_huntingResVals.push_back(res);
+
+            // Checking to see if it found a neuron
+            // Conditions:
+            //  1. if at least 3 resistances have been measured
+            //  2. if 3 sequential steps have resitances greater than the previous step
+            //  3. if total increase across those three steps is greater than the detection threshold
+            //
+            if(AP_Data.resVals.size()>=AP_Data.nDetectSamps)
+            {
+                int size=AP_Data.resVals.size();
+                bool flag(1);
+                for(int i=0; i<AP_Data.nDetectSamps-1; i++)
+                {
+                    if(AP_Data.resVals[size-2-i] < AP_Data.resVals[size-1-i])
+                    {
+
+                    }
+                    else
+                    {
+                        flag = 0; // Flags it if a resistance measurement is not greater than the previous
+                    }
+                }
+
+                if(flag)
+                {
+                    // Could be a neuron, checking the threshold
+                    double my_min(9999),my_max(0);
+                    for(int i=0; i<AP_Data.nDetectSamps; i++)
+                    {
+                        if(my_min > AP_Data.resVals[size-1-i])
+                        {
+                            my_min = AP_Data.resVals[size-1-i];
+                        }
+                        if(my_max < AP_Data.resVals[size-1-i])
+                        {
+                            my_max = AP_Data.resVals[size-1-i];
+                        }
+                    }
+                    qWarning() << my_max << my_min <<my_max-my_min << AP_Data.neuronThresh;
+
+
+
+
+                    if(my_max - my_min > AP_Data.neuronThresh)
+                    {
+                        // It's a neuron
+                        AP_Data.LOG_detectionDepth = ui->lineEditDepth->text().toDouble();
+                        AP_Data.LOG_pipetteHitSize = my_max-my_min;
+                        savePlot("hit ("+QString::number(my_max-my_min)+")",ui->resistancePlot);
+
+                        // Confirm for 10 seconds?
+                        if(AP_Data.posPressureReleaseWait > 0)
+                        {
+                            qWarning() << "Confirming the change in resistance for 12 seconds.  ";
+                            resistanceMeasureMode = 4;
+                            AP_Data.resVals.clear();
+                            AP_Data.huntingFlag = 0;
+                            emit onePingOnlyVersaillies();
+                        }
+                        else
+                        {
+                            // Waiting to apply suction and begin voltage ramp
+
+                            qWarning() << "Skipping the 10 second wait.  Positive pressure released immediately";
+                            resistanceMeasureMode = 6;
+                            atmosphericTimer.start(AP_Data.atmosphericDuration*1000+1000);  // atmospheric doesn't actually start until the gigasealingAtmTimer times out
+
+                            AP_Data.resVals.clear();
+                            // Extra step to help gigaseal.   Suhasa's code does this  My modification is that if
+                            // the hit is bigger than AP_vals.hitNoStepThresh, it won't take the step, it's close enough already
+                            // THIS DIDN'T WORK.  I'M JUST GOING TO INCREASE THE THRESHOLD RATHER THAN DO THIS
+
+//                            if(my_max - my_min < AP_vals.hitNoStepThresh)
+//                            if(1)
+//                            {
+                                qWarning() << "Going the extra step";
+                                int depth = ui->lineEditDepth->text().toInt();
+                                ui->lineEditDepth->setText(QString::number(depth+AP_Data.stepSize));
+                                emit moveStageRelativeSlow(-AP_Data.stepSize);
+//                            }
+//                            else
+//                            {
+//                                qWarning() << "NOT going the extra step";
+//                            }
+                             gigasealAtmTimer.start(1000);  // This will release positive pressure after the motor has had time to finish its last step
+
+
+                        }
+                    }
+                    else
+                    {
+                        // Logging minor hits
+                        if((my_max - my_min > 0.75*AP_Data.neuronThresh) && (AP_Data.minorHitTrip == 0))
+                        {
+                            AP_Data.minorHitTrip = 1;
+                        }
+
+                        if(AP_Data.minorHitTrip != 0){ AP_Data.minorHitTrip++;}
+                        if(AP_Data.minorHitTrip > 4)
+                        {
+                            savePlot("closeHit ("+QString::number(my_max-my_min)+")",ui->resistancePlot);
+                            AP_Data.minorHitTrip = 0;
+                        }
+                    }
+                }
+
+            }
+
+            // Moving motor
+            if(resistanceMeasureMode == 3)
+            {
+                int depth = ui->lineEditDepth->text().toInt();
+                ui->lineEditDepth->setText(QString::number(depth+AP_Data.stepSize));
+                emit moveStageRelativeSlow(-AP_Data.stepSize);
+                AP_Data.LOG_detectionDepth += -AP_Data.stepSize;
+            }
+            break;
+        }
+
+
+        case 4:  // Waiting for specified time to confirm it has made contact with a good cell
+        {
+            ui->textStatus->setText("Neuron Detected.  Checking the quality of the hit...");
+            AP_Data.resVals.push_back(res);
+            plotResData(res);
+            AP_Data.LOG_gigasealingResVals.push_back(res);
+
+            if(AP_Data.resVals.size() >= AP_Data.posPressureReleaseWait)
+            {
+                double first(0),last(0);
+                for(int i=0; i<5; i++)
+                {
+                    first += AP_Data.resVals[i];
+                    last  += AP_Data.resVals[AP_Data.resVals.size()-1-i];
+                }
+
+                AP_Data.resVals.clear();
+                last = last/5;
+                first = first/5;
+                bool go(0);
+                qWarning() << "Condition Check" << last-first << " " << -AP_Data.returnThresh;
+                if(last < AP_Data.LOG_pipetteResValAtDepth)  // If the hit is questionable
+                {
+                    if(last-first < -AP_Data.returnThresh)  // If the resistance doesn't increase more than APreturnThresh, it will return to resistanceMeasureMode 3
+                    {
+                        go = 0;
+                    }
+                    else
+                    {
+                        qWarning() << "Gigasealing..." << AP_Data.LOG_pipetteResValAtDepth << " " << first << " " << last << " " << last-first << " " << AP_Data.returnThresh;
+                        go = 1;
+                    }
+                }
+                else
+                {
+                    go = 1;
+                }
+
+                if(go)
+                {
+                    // Waiting to apply suction and begin voltage ramp
+                    resistanceMeasureMode = 6;
+                    atmosphericTimer.start(AP_Data.atmosphericDuration*1000);
+                    qWarning() << "Atmospheric timer started" << AP_Data.atmosphericDuration*1000;
+
+                    ui->textStatus->setText("Pressure released");
+                    emit switchPressure(Arduino::PRESSURE_ATM);
+                    qWarning() << "UPDATE THIS CODE TO MOVE ONE MORE STEP BEFORE RELEASING PRESSURE AND GIGASEALING";
+                    ui->textStatus->setText("Pressure released");
+                    AP_Data.resVals.clear();
+                    emit onePingOnlyVersaillies();
+                }
+                else
+                {
+                    ui->textStatus->setText("Returning to neuron hunting...");
+                    QThread::msleep(500);
+                    resistanceMeasureMode = 3;
+                    AP_Data.huntingFlag = 1;
+                    ui->textStatus->setText("Hunting for neurons...");
+                    emit stopRCheck();
+                    emit onePingOnlyVersaillies();
+                    AP_Data.resVals.clear();
+                }
+            }
+            else
+            {
+                emit onePingOnlyVersaillies();
+            }
+            break;
+        }
+
+
+        case 5:  // Applying suction and voltage ramp
+            plotResData(res);
+            AP_Data.LOG_gigasealingResVals.push_back(res);
+            emit switchPressure(Arduino::PRESSURE_ATM);
+//            emit switchPressure(Arduino::PRESSURE_LOWV);
+            suctionTimer.start(AP_Data.suctionDuration*1000);
+            qWarning() << "Suction timer started" << AP_Data.suctionDuration*1000;
+            ui->textStatus->setText("Applying suction ### ATM...");
+            resistanceMeasureMode = 6;
+            emit onePingOnlyVersaillies();
+            break;
+
+        case 6:
+            plotResData(res);
+
+            AP_Data.LOG_gigasealingResVals.push_back(res);
+            emit onePingOnlyVersaillies();
+            // Waiting for suction and atmospheric timer to time out
+            // Also waiting for the break in timer to time out and continue on to case 8.
+            break;
+
+
+        case 7:  // Gigasealing
+        {
+            ui->textStatus->setText("Waiting for gigaseal to form...");
+            plotResData(res);
+            AP_Data.resVals.push_back(res);
+            AP_Data.LOG_gigasealingResVals.push_back(res);
+//            qWarning() << APgigasealStartTime.msecsTo(QTime::currentTime())/1000.0 << APgigasealMaxWait;
+
+            double ave(0);
+            if(AP_Data.resVals.size() > 2)
+            {
+                for(int i=0; i<3; i++)
+                {
+                    ave += AP_Data.resVals[AP_Data.resVals.size()-1-i];
+                }
+                ave = ave/3;
+
+                AP_Data.breakInFlag = 0;
+                AP_Data.stopGigasealFlag = 0;
+                double t = AP_Data.gigasealStartTime.msecsTo(QTime::currentTime())/1000.0;
+//                qWarning() << "time: " << t << " " << AP_vals.breakInFlag << " "  << AP_vals.stopGigasealFlag;
+                if(ave > 1000)  // If gigasealed, break in
+                {
+                    qWarning() << "Gigaseal achieved, breaking in...";
+                    AP_Data.breakInFlag = 1;
+                }
+                else if(ave < 0)
+                {
+                    emit onePingOnlyVersaillies();
+                }
+                else if((ave < 20) && (t > 20))  // if the seal isn't above 10 Mohms in 15 seconds, change the pipette
+                {
+                    qWarning() << "Resistance less than 20 Mohms after 20 seconds.  Changing pipette " << ave;
+                    AP_Data.stopGigasealFlag = 1;
+                }
+                else if((ave < 100) && (t > 120)) // if the seal isn't above 100 Mohms in 30 seconds, change the pipette
+                {
+                    qWarning() << "Resistance less than 100 Mohms after 120 seconds.  Changing pipette " << ave;
+                    AP_Data.stopGigasealFlag = 1;
+                }
+                else if((ave < 400) && (t > 250)) // if the seal isn't above 400 Mohms in 100 seconds, change the pipette
+                {
+                    qWarning() << "Resistance less than 400 Mohms after 250 seconds.  Changing pipette " << ave;
+                    AP_Data.stopGigasealFlag = 1;
+                }
+                    // If the gigaseal exceeds the maximum wait time,
+                else if(t > AP_Data.gigasealMaxWait)
+                {
+                    ui->textStatus->setText("Gigaseal never formed.  Seal Resistance = " + QString::number(ave));
+                    // If resistance is greater than the threshold, break in
+                    if(res>AP_Data.breakInThresh)
+                    {
+                        AP_Data.breakInFlag = 1;
+                    }
+
+                    // If it's below the threshold, quit and change pipette.
+                    else
+                    {
+                        qWarning() << "Resistance ("<< QString::number(res )<<") was below threshold (" << QString::number(AP_Data.breakInThresh) << ") after maximum wait time, changing pipette";
+                        AP_Data.stopGigasealFlag = 1;
+                    }
+                }
+                else
+                {
+                    emit onePingOnlyVersaillies();
+                }
+                qWarning() << "time: " << t; // << " " << AP_vals.breakInFlag << " "  << AP_vals.stopGigasealFlag;
+                if(AP_Data.breakInFlag)
+                {                    
+                    breakInTimer.start(500);  // give it a few seconds to retract the 4 microns and stabilize before breaking in.
+                    emit setHoldingInDAQ(-0.07);
+                    AP_Data.resVals.clear();
+                    AP_Data.breakInFlag = 0;
+                }
+
+                if(AP_Data.stopGigasealFlag)
+                {
+                    savePlot("gigasealing",ui->resistancePlot);
+                    resistanceMeasureMode = 6;
+                    ui->textStatus->setText("Failed to seal.  Changing pipette...");
+                    emit changePipette();
+                    ui->lineEditDepth->setText("0");
+                    save = 1;
+                    AP_Data.resVals.clear();
+                    AP_Data.stopGigasealFlag = 0;
+                }
+            }
+            else
+            {
+                emit onePingOnlyVersaillies();
+            }
+
+            break;
+        }
+
+        case 8: // Break in
+        {
+            if(!AP_Data.overrideBreakIn)
+            {
+                static int attemptNum(0);
+                AP_Data.resVals.push_back(abs(res));  // Change this later
+                AP_Data.LOG_gigasealingResVals.push_back(res);
+                plotResData(res);
+                AP_Data.breakInFailed = 0;
+
+                // Averaging 7 resistance measurements between break in attempts
+                if(AP_Data.resVals.size()>7)
+                {
+                    // Calculating the mean and stdev
+                    double mean(0);
+                    double stdev(0);
+                    bool negativeFlag(0);
+                    for(unsigned int i=0; i<AP_Data.resVals.size(); i++)
+                    {
+                        if(AP_Data.resVals[i] < 0)
+                        {
+                            negativeFlag = 1;
+                        }
+                        mean +=AP_Data.resVals[i];
+                    }
+                    mean = mean/AP_Data.resVals.size();
+
+                    for(unsigned int i=0; i<AP_Data.resVals.size(); i++)
+                    {
+                        stdev += pow(AP_Data.resVals[i]-mean,2);
+                    }
+
+                    double smallest(9999);
+                    for(unsigned int i=0; i<AP_Data.resVals.size(); i++)
+                    {
+                        if(AP_Data.resVals[i] < smallest){ smallest = AP_Data.resVals[i];}
+                    }
+
+                    if(smallest < 500)  // Making sure that if it broke in during one of the 7 samples, that it switches.
+                    {
+                        qWarning() << "One of the samples was less than 500Mohms.  We'll assume it has broken in.";
+                        mean = smallest;
+                    }
+
+                    stdev = pow(stdev,0.5);
+                    AP_Data.resVals.clear(); // always use new values for each break in attempt
+
+                    qWarning() << "Break In Resistance Check.  Mean: " << mean << " Stdev: " << stdev;
+
+                    // If the stdev is less than 10% of the mean of the resistance values, consider it a fairly accurate value
+                    // This has the effect of waiting until the membrane stabilizes and the resistance can be measured properly
+                    // before deciding whether to continue or not.
+                    if(!negativeFlag)  // ADD A STANDARD DEVIATION CONDITIONAL HERE IF DESIRED.  IT SLOWS DOWN THE BREAK IN PROCESS THOUGH.
+                    {
+                        if(mean < 500)  // Broken in
+                        {
+                            savePlot("gigasealing",ui->resistancePlot);
+                            ui->textStatus->setText("Broken in.  Retracting 0 microns and starting stimuli and recording...");
+                            qWarning() << "Retracting 0 microns..."; // 7.4um are just backlash in the actuator
+                            int depth = ui->lineEditDepth->text().toInt();
+                            //ui->lineEditDepth->setText(QString::number(depth - 6));
+                            //emit enableStage();
+                            //emit moveStageRelativeSlow( 4 + 7.4);  // 7.4 um is the backlash in the motor
+                            //emit disableStage();
+                            resistanceMeasureMode = 9;  // Go to whole cell quality control
+                            emit onePingTimer.start(5000); // give it time to move and stabilize before starting memtest
+                            attemptNum = 0;
+                            AP_Data.brokenInFlag = true;
+                        }
+                        else  // Try break in again
+                        {
+                            switch(AP_Data.breakInType)
+                            {
+                                case 0:  // ZAP BREAK IN
+                                {
+
+                                    if(attemptNum < AP_Data.breakInTableSuction.size())
+                                    {
+                                        qWarning() << "Not broken in.  Trying a zap pulse: " << AP_Data.breakInTableZap[attemptNum][1] <<" usec.";
+                                        multiclamp.selectChannel(AP_Data.headstageNum);
+                                        emit zap(AP_Data.breakInTableZap[attemptNum][1]*1.0/1000000); // Zap in seconds
+//                                        QThread::msleep(1200); // waiting for break in before NEED TO FIX THIS BECAUSE IT IS ZAPPING DURING THE RESISTANCE MEASUREMENT.  IT SHOULD USE A SINGLE SHOT TIMER OR SOMETHING BEFORE EMITTING onePingOnlyVersailles.
+                                        attemptNum++;
+                                    }
+                                    else
+                                    {
+                                        AP_Data.brokenInFlag = 0;
+                                        qWarning() << "Not broken in.  Running membrane test and waiting for user...";
+                                        ui->textStatus->setText("Couldn't break in.  Click \"Start Stimulus\" if you manage to break in manually.  If not, click restart.  Will automatically restart in 100 seconds.");
+                                        ui->pages->setCurrentIndex(3);
+                                        attemptNum = 0;
+                                        AP_Data.breakInFailed = 1;
+                                        savePlot("gigasealing",ui->resistancePlot);
+                                        resistanceMeasureMode = 9;  // Go to whole cell quality control
+                                        emit onePingOnlyVersaillies();
+                                    }
+                                    break;
+                                }
+                                case 1:  // SUCTION PULSE BREAK IN
+                                {
+                                    if(attemptNum < AP_Data.breakInTableSuction.size())
+                                    {
+                                        qWarning() << "Not broken in.  Trying a suction pulse: " << AP_Data.breakInTableSuction[attemptNum][1] <<"mbar for " << AP_Data.breakInTableSuction[attemptNum][2] << "msecs.  Trying " << AP_Data.breakInTableSuction[attemptNum][3] << " suction pulses...";
+                                        emit setPressure(Arduino::PRESSURE_HIGHV,AP_Data.breakInTableSuction[attemptNum][1]);
+                                        emit breakIn(AP_Data.breakInTableSuction[attemptNum][2],200,AP_Data.breakInTableSuction[attemptNum][3]);
+                                        if(attemptNum < AP_Data.breakInTableSuction.size()-1)
+                                        {
+                                            emit setPressure(Arduino::PRESSURE_HIGHV,AP_Data.breakInTableSuction[attemptNum+1][1]);
+                                        }
+                                        attemptNum++;
+                                    }
+                                    else
+                                    {
+                                        AP_Data.brokenInFlag = 0;
+                                        qWarning() << "Not broken in.  Running membrane test and waiting for user...";
+                                        ui->textStatus->setText("Couldn't break in.  Click \"Start Stimulus\" if you manage to break in manually.  If not, click restart.  Will automatically restart in 100 seconds.");
+                                        ui->pages->setCurrentIndex(3);
+                                        attemptNum = 0;
+                                        AP_Data.breakInFailed = 1;
+                                        savePlot("gigasealing",ui->resistancePlot);
+                                        resistanceMeasureMode = 9;  // Go to whole cell quality control
+                                        emit onePingOnlyVersaillies();
+                                    }
+                                    break;
+                                }
+                                case 2:  // RAMP BREAK IN
+                                {
+
+                                    if(attemptNum < AP_Data.breakInTableRamp.size())
+                                    {
+                                        qWarning() << "Attempting ramp break in: " << AP_Data.breakInTableRamp[attemptNum][2] << AP_Data.breakInTableRamp[attemptNum][1];
+                                        emit breakInRamp(AP_Data.breakInTableRamp[attemptNum][2],AP_Data.breakInTableRamp[attemptNum][1]);
+                                        attemptNum++;
+                                    }
+                                    else
+                                    {
+                                        AP_Data.brokenInFlag = 0;
+                                        qWarning() << "Not broken in.  Running membrane test and waiting for user...";
+                                        ui->textStatus->setText("Couldn't break in.  Click \"Start Stimulus\" if you manage to break in manually.  If not, click restart.  Will automatically restart in 100 seconds.");
+                                        ui->pages->setCurrentIndex(3);
+                                        attemptNum = 0;
+                                        AP_Data.breakInFailed = 1;
+                                        savePlot("gigasealing",ui->resistancePlot);
+                                        resistanceMeasureMode = 9;  // Go to whole cell quality control
+                                        emit onePingOnlyVersaillies();
+                                    }
+                                    break;
+                                }
+                                default:
+                                {
+                                    qWarning() << "UNKNOWN BREAK-IN CASE SELECTED";
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    else
+                    {
+                        emit onePingOnlyVersaillies();
+                        qWarning() << "Found a negative resistance value.  Throwing out measurement set and taking new ones.";
+                    }
+                }
+                else
+                {
+//                    qWarning() << "Break In one ping only sent.";
+//                    onePingTimer.start(200);
+                    emit onePingOnlyVersaillies();
+                }
+                break;
+            }
+            else
+            {
+                AP_Data.brokenInFlag = 0;
+                qWarning() << "Not broken in.  Running membrane test and waiting for user...";
+                ui->textStatus->setText("Skipping break in.  Click \"Start Stimulus\" if you manage to break in manually.  If not, click restart.  Will automatically restart in 100 seconds.");
+                ui->pages->setCurrentIndex(3);
+                savePlot("gigasealing",ui->resistancePlot);
+                resistanceMeasureMode = 9;  // Go to whole cell quality control
+                emit onePingOnlyVersaillies();
+            }
+        }
+
+        case 9:  // Checking the resting membrane potential, spontaneous spiking and access resistance
+            qWarning() << "The resistance dropped or was unable to break in.  Checking for healthy recording...";
+            ui->textStatus->setText("Checking the quality of the seal and cell quality metrics...");
+            emit stopRCheck();
+            emit initDAQMemTest();  // change to event?
+            ui->pages->setCurrentIndex(3);
+            break;
+
+
+        case 10:  // Waiting for recording to finish
+            emit switchBNC(false);
+            resistanceMeasureMode = 11;
+            break;
+
+        case 11:
+            qWarning() << "Resistance check still going on even though it shouldn't be...";
+            break;
+
+        case 12:
+        {
+            qWarning() << "Mode 12 started";
+            plotResData(res);
+            AP_Data.LOG_retractionResVals.push_back(res);
+
+            static int f(0);
+            qWarning() << "Retracting fast to reform the gigaseal.  Resistance = " << QString::number(res) << " " << f;
+            if(f>100 && res < 1000)
+            {
+                qWarning() << "Gigaseal never formed after retracting 300 steps.  Changing pipette....";
+                emit stopRCheck();
+                resistanceMeasureMode = 13;  // ignore more res vals
+                retractTimer.start(2000);
+                busy.start();
+                ui->textStatus->setText("Retracting and changing pipette...");
+                savePlot("retraction",ui->resistancePlot);
+                f = -1;
+            }
+            else if(res>1000)
+            {
+                ui->textStatus->setText("Gigaseal reformed.  Retracting...");
+                emit stopRCheck();
+                resistanceMeasureMode = 13;  // ignore more res vals
+                retractTimer.start(2000);
+                qWarning() << "Gigaseal reformed.  Changing pipette." ;
+                busy.start();
+                f = -1;
+                savePlot("retraction",ui->resistancePlot);
+            }
+            else
+            {
+                double depth = ui->lineEditDepth->text().toDouble();
+                depth = depth-AP_Data.slowRetractStepSize;
+                ui->lineEditDepth->setText(QString::number(depth));
+                emit moveStageRelativeFast(-AP_Data.slowRetractStepSize);
+                onePingTimer.start(1100);
+                f++;
+            }
+
+            break;
+        }
+        case 13:  // ignore resistance check values during the resting membrane potential check
+
+            break;
+
+        default:
+        {
+            qWarning() << "The Resistance values are not being viewed by the algorithm...";
+            break;
+        }
+
+    }
+
+
+    if(save)
+    {
+        qWarning() << "Saving the resistance values.  ADD CODE HERE";
+
+        ofstream fout;
+
+        fout.open((QString(QDate::currentDate().toString() + "_" + QTime::currentTime().toString() + ".csv").toStdString()).c_str());
+
+        for(int i=0; i<AP_Data.resistanceValues.size(); i++)
+        {
+            fout << AP_Data.resistanceValues[i] << ", ";
+        }
+        fout.close();
+
+        AP_Data.resistanceValues.clear();
+    }
+}
+
+void MainWindow::retractTimerTimeout()
+{
+    static int f(0);
+    f++;
+    if(f<6)  // retracting 25 microns before fast retract
+    {
+        int depth = ui->lineEditDepth->text().toInt();
+        ui->lineEditDepth->setText(QString::number(depth-5));
+        emit moveStageRelativeSlow(-5);
+    }
+    else
+    {
+        emit clearAllTasks();
+        ui->textStatus->setText("Changing pipette...");
+        ui->groupBoxRetract->setEnabled(true);
+        emit changePipette();
+        ui->lineEditDepth->setText("0");
+        resistanceMeasureMode = -1;
+        f = 0;
+        retractTimer.stop();
+    }
+}
+*/
+
+void MainWindow::updateMemTestVals(QVector<double> vals)
+{
+    ofstream cout;
+    cout << "Trial Number: " << AP_Data.trialNum << "Cell parameters: ";
+    for(int i=0; i<vals.size(); i++)
+    {
+       cout << vals[i] << " " ;
+    }
+    cout << endl;
+    ui->lineEditCm->setText(QString::number(vals[0],'f',3));  // Cm Membrane Capacitance
+    ui->lineEditRm->setText(QString::number(vals[1],'f',3));  // Rm Membrane Resistance
+    ui->lineEditRa->setText(QString::number(vals[2],'f',3));  // Ra Access Resistance
+    ui->lineEditTau->setText(QString::number(vals[3],'f',3)); // Tau RC time constant
+    ui->lineEditHold->setText(QString::number(vals[4],'f',4));// Holding holding current
+}
+
+// ************************************************************************************
+// ************************************************************************************
+
+/*
+void MainWindow::breakInTimerTimeout()
+{
+    emit disableStage();
+    ui->textStatus->setText("Disabling stage motor and breaking in... ");
+    resistanceMeasureMode = 8;
+    emit onePingOnlyVersaillies();
+}
+
+void MainWindow::onePingTimerTimeout()
+{
+    emit onePingOnlyVersaillies();
+}
+
+void MainWindow::restartTimerTimeout()
+{
+//    if(ui->pages->currentIndex()==4)
+//    {
+//        ui->pushButtonRestart->animateClick(100);
+//    }
+
+    busy.start();
+    ui->textStatus->setText("Changing pipette...");
+    emit changePipette();
+    ui->lineEditDepth->setText("0");
+}
+
+void MainWindow::gigasealAtmTimerTimeout()
+{
+    emit switchPressure(Arduino::PRESSURE_LOWV);
+//    emit switchPressure(Arduino::PRESSURE_ATM);
+    ui->textStatus->setText("Pressure released ### LOWV");
+    qWarning() << "Atmospheric pressure started" << AP_Data.atmosphericDuration*1000;
+    emit onePingOnlyVersaillies();
+}
+
+void MainWindow::atDepth()
+{
+    resistanceMeasureMode = 2;
+    emit stopRCheck();
+    ui->textStatus->setText("Waiting for tissue to stabilize...");
+    startWaitTimer3.start(1000);
+}
+
+//void MainWindow::atDepth2()
+//{
+//    resistanceMeasureMode = 1;  // Keep it in 1 until ready to hunt.  1 is where the algorithm is.
+//    alg2WaitTimer3.start(10000);
+//}
+
+
+void MainWindow::atmosphericTimerTimeout()
+{
+    qWarning() << "Atmospheric timer timed out...";
+    resistanceMeasureMode = 5;
+}
+
+void MainWindow::rampTimerTimeout()
+{
+    qWarning() << "Ramp Started.";
+    emit startRamp();
+}
+
+
+void MainWindow::suctionTimerTimeout()
+{
+    emit switchPressure(Arduino::PRESSURE_ATM);
+    resistanceMeasureMode = 7;
+    rampTimer.start((AP_Data.rampStartTime)*1000);
+    qWarning() << "Ramp timer started.";
+    AP_Data.gigasealStartTime = QTime::currentTime();
+}
+
+
+void MainWindow::breakInCallback()
+{
+    if(!AP_Data.breakInFailed)
+    {
+//        qWarning() << "Break In Callback sent from zap or arduino pressure.";
+        emit onePingOnlyVersaillies();
+    }
+}
+
+void MainWindow::vStimStopped()
+{
+    qWarning() << "Visual stimulus stopped.";
+}
+void MainWindow::vStimStarted()
+{
+    qWarning() << "Visual stimulus started.";
+}
+
+
+
+// Initialize
+void MainWindow::daqInitReadyR()
+{
+    daqInit = 1;
+    qWarning() << "DAQ initialized";
+}
+
+
+void MainWindow::daqInitErrorR()
+{
+    daqInit = -1;
+    qWarning() << "DAQ Error! ";
+}
+
+
+void MainWindow::daqInitMemTestErrorSlot()
+{
+    qWarning() << "DAQ initialization FAILED for membrane test";
+}
+
+
+
+
+
+// Main Window CBs
+void MainWindow::on_pushButtonRestart_clicked()
+{
+    // Resetting autopatcher variables
+    AP_Data.brokenInFlag  = 0;
+    AP_Data.breakInFailed = 0;
+    AP_Data.resVals.clear();
+    AP_Data.resCounter    = 0;
+//    AP_vals.alg2StepNum = 0;
+//    res1 = 0;
+//    res2 = 0;
+//    res3 = 0;
+//    res4 = 0;
+//    AP_vals.clearMode = 0;
+    AP_Data.huntingFlag = 0;
+    AP_Data.breakInFlag = 0;
+    AP_Data.stopGigasealFlag = 0;
+    AP_Data.minorHitTrip = 0;
+
+    if(ui->pages->currentIndex() == 0)
+    {
+        // do nothing if on page 0
+    }
+    else if(ui->pages->currentIndex() == 1)
+    {
+        // Code to start over if on page 1
+
+        // Step 1. Return to "Go!" page
+        // Retract Pipette
+
+        // testing get next pipette code
+        //qWarning() << "Get next pipette";
+        //QMetaObject::invokeMethod(tMotors,"getPipetteStep1",Qt::QueuedConnection);
+    }
+    else if(ui->pages->currentIndex() == 2)
+    {
+        qWarning() << "Changing pipette";
+        ui->textStatus->setText("Changing pipette");
+        ui->groupBoxRetract->setVisible(false);
+        ui->groupBoxOverrides->setVisible(true);
+        emit stopRCheck();
+        disconnect(this,SIGNAL(onePingOnlyVersaillies()),&daq,SLOT(oneResCheck()));
+        restartTimer.start(3000);
+        emit switchPressure(Arduino::PRESSURE_ATM);
+        restartCase3StopSlotEnabled = 1;
+    }
+    else if(ui->pages->currentIndex() == 4)
+    {
+        // Code to start over if on page 4
+        qWarning() << "Changing pipette";
+        ui->textStatus->setText("Changing pipette");
+        ui->groupBoxRetract->setVisible(false);
+        ui->groupBoxOverrides->setVisible(true);
+        emit stopMemTest();
+        emit switchPressure(Arduino::PRESSURE_ATM);
+        restartCase3StopSlotEnabled = 1;
+        restartTimer.start(3000);
+    }
+    else if(ui->pages->currentIndex() == 5)
+    {
+        // Code to start over if on page 5
+    }
+    else if(ui->pages->currentIndex() == 6)
+    {
+        // Code to start over if on page 6
+    }
+
+    ui->pushButtonRestart->setVisible(false);
+}
+
+
+void MainWindow::restartCase3CompleteSlot()
+{
+    if(restartCase3StopSlotEnabled)
+    {
+
+    }
+}
+*/
+
+void MainWindow::busyTimeout()
+{
+    static int num(0);
+    switch(num)
+    {
+    case 0:
+        ui->textBusy->setText("--");
+        num = 1;
+        break;
+    case 1:
+        ui->textBusy->setText("\\");
+        num = 2;
+        break;
+    case 2:
+        ui->textBusy->setText("|");
+        num = 3;
+        break;
+    case 3:
+        ui->textBusy->setText("/");
+        num = 0;
+        break;
+    }
+}
+
+/*
+void MainWindow::stageMotorOn()
+{
+//    qWarning() << "Motor ON";
+    ui->LED->setPixmap(imgLEDon);
+}
+
+
+void MainWindow::stageMotorOff()
+{
+//    qWarning() << "Motor OFF";
+    ui->LED->setPixmap(imgLEDoff);
+
+    if(AP_Data.huntingFlag || resistanceMeasureMode == 3)
+    {
+        emit onePingOnlyVersaillies();
+    }
+}
+*/
+
+
+// *********************
+// Page 0 CBs
+// *********************
+void MainWindow::on_pushButtonGo1_released()
+{
+    ui->pages->setEnabled(false);
+    if(!stateRunning)
+    {
+        currentState = &hardwareInitState;
+        startStateMachine();
+    }
+}
+
+// *********************
+// Page 1 CBs
+// *********************
+void MainWindow::on_pushButtonGo3_released()
+{
+    // This is simpler than using the signals and slots
+    setBrainHeightState.gui_pushbuttonGO3Released(tMotor);
+    ui->label_CurrentPosition->setText(QString::number(tMotor->getPosition()*1000));
+}
+
+
+//void MainWindow::pushButtonDownAdjust()
+//{
+//    currentState->gui_downAdjustBtn(pipetteAdjustDistance);
+//}
+
+//void MainWindow::pushButtonUpAdjust()
+//{
+//    currentState->gui_upAdjustBtn(pipetteAdjustDistance);
+//}
+
+// *********************
+// Page 2 CBs
+// *********************
+void MainWindow::plotRawData()
+{
+    QTime profile;
+    profile = profile.currentTime();
+    // Loading the QCPData structure with new data
+    static int indexMarker(0);  // Marks the key where the last data point was added to the plot
+    int length = rawPlotData.size();
+    // Filling the buffer if it isn't full.  Once it' wraps around the end of the buffer, it sets the indexMarker and all
+    // subsequent data is handled in the wrapping buffer fashion.
+    if(rawPlotData.size() < rawPlotBuffSize)
+    {
+        if(length+raw.size() < rawPlotBuffSize)
+        {
+            int j=0;
+            for(int i=length; i<raw.size()+length; i++)
+            {
+                rawPlotData.insert(i,QCPData(i,raw.at(j)));
+                j++;
+            }
+        }
+        else
+        {
+            int j=0;
+            for(int i=length; i<rawPlotBuffSize; i++)
+            {
+                rawPlotData.insert(i,QCPData(i,raw.at(j)));
+                j++;
+            }
+            int tmp = j;
+            for(int i=0; i<raw.size()-tmp; i++)
+            {
+                rawPlotData.insert(i,QCPData(i,raw.at(j)));
+                j++;
+                indexMarker = j-tmp;
+            }
+        }
+    }
+
+    // If the data has wrapped around the buffer once already, this gives it the o-scope behavior
+    else if(length == rawPlotBuffSize)
+    {
+        // If the new data won't wrap around the end of the buffer
+        if(indexMarker+raw.size()<rawPlotBuffSize)
+        {
+
+            int j=0;
+            for(int i=indexMarker; i<raw.size()+indexMarker; i++)
+            {
+                rawPlotData.insert(i,QCPData(i,raw.at(j)));
+                j++;
+            }
+            indexMarker = raw.size() + indexMarker;
+        }
+
+        // If the new data will wrap around
+        else if(indexMarker+raw.size() >= rawPlotBuffSize)
+        {
+            int j=0;
+            for(int i=indexMarker; i<rawPlotBuffSize; i++)
+            {
+                rawPlotData.insert(i,QCPData(i,raw.at(j)));
+                j++;
+            }
+            int tmp = j;
+            for(int i=0; i<raw.size()-tmp; i++)
+            {
+                rawPlotData.insert(i,QCPData(i,raw.at(j)));
+                j++;
+            }
+            indexMarker = j-tmp;
+        }
+    }
+
+    // Plotting
+    ui->rawPlot->graph(0)->setData(&rawPlotData,true);
+    ui->rawPlot->yAxis->rescale();
+    ui->rawPlot->replot();
+
+    //qWarning() << "Raw Plot data size: " << ui->rawPlot->graph(0)->data()->size();
+    //qWarning() << "Raw plot profiler" << profile.msec() << profile.currentTime().msec() - profile.msec() << profile.currentTime().msec();
+}
+
+
+void MainWindow::plotResData(double res)
+{
+    // This function adds the resistance value to the resistance plot
+    // and overwrites the raw current traces with the new data
+
+    if(resPlotData.size()<70)
+    {
+//        qWarning() << resPlotData.size() << " " << resPlotData.keys().value(resPlotData.size()-1);
+        resPlotData.insert(resPlotData.size(),QCPData(resPlotData.size(),res));
+        ui->resistancePlot->graph(0)->clearData();
+        ui->resistancePlot->graph(0)->addData(resPlotData);
+    }
+    else
+    {
+//        qWarning() << "Removing... " << resPlotData.keys().value(0);
+//        qWarning() << "Adding..... " << resPlotData.keys().value(resPlotData.size()-1)+1;
+        resPlotData.remove(resPlotData.keys().value(0));
+        resPlotData.insert(resPlotData.keys().value(resPlotData.size()-1)+1,QCPData(resPlotData.keys().value(resPlotData.size()-1)+1,res));
+        ui->resistancePlot->graph(0)->clearData();
+        ui->resistancePlot->graph(0)->addData(resPlotData);
+    }
+
+    // There usually aren't very many resistance values (<200) so code optimization here is unnecessary.
+    QList<QCPData> vals = resPlotData.values();
+    double resMax = vals.at(0).value;
+    double resMin = vals.at(0).value;
+    for(int i=0; i<vals.size()-1; i++)
+    {
+        if(vals.at(i+1).value>resMax)
+        {
+            resMax = vals.at(i+1).value;
+        }
+        if(vals.at(i+1).value<resMin)
+        {
+            resMin = vals.at(i+1).value;
+        }
+    }
+
+    ui->resistancePlot->yAxis->setRange(resMin-resMax*0.05,resMax+0.05*resMax);
+    double start = resPlotData.keys()[0]-1;
+    double end   = resPlotData.keys()[resPlotData.keys().size()-1]+1;
+    ui->resistancePlot->xAxis->setRange(start,end);
+    ui->resistancePlot->replot();
+}
+
+// *********************
+// General CBs
+// *********************
+void MainWindow::keyReleaseEvent(QKeyEvent *event)
+{
+    if(event->isAccepted())
+    {
+        switch(event->key())
+        {
+        case Qt::Key_Down:
+            event->accept();
+            if(ui->pages->widget(ui->pages->currentIndex())->objectName() == "page_brain_height_adjustment")  ui->pushButtonDownAdjust->animateClick(500);
+            break;
+
+        case Qt::Key_Up:
+            event->accept();
+            if(ui->pages->widget(ui->pages->currentIndex())->objectName() == "page_brain_height_adjustment")  ui->pushButtonUpAdjust->animateClick(500);
+            break;
+
+        case Qt::Key_Enter:
+            event->accept();
+            if(ui->pages->widget(ui->pages->currentIndex())->objectName() == "page_hardware_init")  ui->pushButtonGo1->animateClick(100);
+            else if(ui->pages->widget(ui->pages->currentIndex())->objectName() == "page_hardware_init")  ui->pushButtonGo3->animateClick(100);
+            break;
+
+        case Qt::Key_Return:
+            event->accept();
+            if(ui->pages->widget(ui->pages->currentIndex())->objectName() == "page_hardware_init")  ui->pushButtonGo1->animateClick(100);
+            else if(ui->pages->widget(ui->pages->currentIndex())->objectName() == "page_hardware_init")  ui->pushButtonGo3->animateClick(100);
+            break;
+
+        default:
+            event->ignore();
+            break;
+        }
+    }
+}
+
+
+
+
+
+//void MainWindow::clearPipetteFinished()
+//{
+//    switch(AP_vals.clearMode)
+//    {
+//    case 0:  // This is the first pipette clearing callback
+
+//        // Send it back to the code in the resDataReady slot where most of the algorithm is implemented.
+//        alg2WaitTimer1.start(3000); // 3 second wait after clearing for pipette to stabilize
+//        break;
+
+//    case 1:  // This is the second pipette clearing callback
+
+//        // Send it back to the code in the resDataReady slot where most of the algorithm is implemented.
+//        alg2WaitTimer4.start(3000);
+//        break;
+//    }
+//}
+
+//void MainWindow::alg2WaitTimer1Timeout()
+//{
+//    // Measure resistance and send it back up to the resDataReady slot where most of the algorithm is implemented
+//    emit onePingOnlyVersaillies();
+//}
+
+//void MainWindow::alg2WaitTimer2Timeout()
+//{
+//    AP_vals.alg2StepNum = 2;
+//    emit onePingOnlyVersaillies();
+//}
+
+//void MainWindow::alg2WaitTimer3Timeout()
+//{
+//    AP_vals.clearMode = 1;
+//    emit clearPipette(2,200,1000);
+//}
+
+//void MainWindow::alg2WaitTimer4Timeout()
+//{
+//    AP_vals.alg2StepNum = 4;
+//    emit onePingOnlyVersaillies();
+//}
+
+//void MainWindow::alg2WaitTimer5Timeout()
+//{
+//    AP_vals.alg2StepNum = 5;
+//    emit onePingOnlyVersaillies();
+//}
+
+void MainWindow::on_pushButtonHALT_clicked()
+{
+    qWarning() << "Halt clicked.  ADD CODE FOR INTERRUPTING STATES";
+//    ifstream fin;
+//    string str;
+//    emit clearAllTasks();
+//    while(1)
+//    {
+//        qWarning() << QDir::currentPath();
+//        fin.open("go.txt");
+//        if(fin.is_open())
+//        {
+//            getline(fin,str);
+//            qWarning() << str.c_str() << " " << (QString(str.c_str()).compare("1")==0);
+//            if(QString(str.c_str()).compare("1")==0)
+//            {
+//                break;
+//            }
+//            fin.close();
+//        }
+//        else
+//        {
+//            qWarning() << "go.txt is not opened";
+//        }
+//        QThread::sleep(2);
+//    }
+//    fin.close();
+}
+
+void MainWindow::savePlot(QString fname, QCustomPlot *plot)
+{
+    QString desktopDir = QStandardPaths::standardLocations(QStandardPaths::DesktopLocation).at(0);
+    QString ffname = "trial " + QString::number(AP_Data.trialNum) + " " +fname+ ".png";
+    QString date  = QDate::currentDate().toString("M-d");
+    QString fullpath = desktopDir + "/" + date + "/trial " + ffname;
+
+    plot->savePng(fullpath,800,600);
+}
+
+void MainWindow::incrementTrialNumber()
+{
+    if(stateRunning && currentState != NULL) AP_Data = currentState->getData();
+    savePreferences();
+}
+
+void MainWindow::apSettingsChanged()
+{
+    qWarning() << "Autopatcher settings window closed";
+    AP_Data = ap_win->getVals();
+    if(currentState != NULL) currentState->setData(AP_Data);
+    AP_Data.saveSettings();
+}
+
+void MainWindow::breakInSettingsChangedZap()
+{
+    qWarning() << "Break in settings changed ";
+    AP_Data.breakInTableZap = brkZapSettings->getTable();
+    if(currentState != NULL) currentState->setData(AP_Data);
+}
+
+void MainWindow::breakInSettingsChangedSuction()
+{
+    qWarning() << "Break in settings changed Suction";
+    AP_Data.breakInTableSuction = brkSuckSettings->getTable();
+    if(currentState != NULL) currentState->setData(AP_Data);
+}
+
+void MainWindow::breakInSettingsChangedRamp()
+{
+    qWarning() << "Break in settings changed Ramp";
+    AP_Data.breakInTableRamp = brkRampSettings->getTable();
+    if(currentState != NULL) currentState->setData(AP_Data);
+}
+
+void MainWindow::hwSettingsChanged()
+{
+    //qWarning() << "Hardware settings window closed";
+    for(int i=0; i<allStates.size(); i++)
+    {
+        allStates[i]->setHardwareVals(hw_win);
+    }
+}
+
+void MainWindow::preferencesWindowClosed()
+{
+    AP_Data.dataDir     = pref_win->getDataDir();
+    AP_Data.fileFormat  = pref_win->getFileFormat();
+    qWarning() << "FileFormat: " << AP_Data.fileFormat;
+    savePreferences();
+}
+
+void MainWindow::on_actionBreakInSuctionWindow_triggered()
+{
+    brkSuckSettings->setTableData(AP_Data.breakInTableSuction);
+    brkSuckSettings->show();
+}
+
+void MainWindow::on_actionBreakInZapWindow_triggered()
+{
+    brkZapSettings->setTableData(AP_Data.breakInTableZap);
+    brkZapSettings->show();
+}
+
+void MainWindow::on_actionBreakInRampWindow_triggered()
+{
+    brkRampSettings->setTableData(AP_Data.breakInTableRamp);
+    brkRampSettings->show();
+}
+
+void MainWindow::on_actionAutopatcher_Settings_triggered()
+{
+    if(stateRunning && currentState != NULL) AP_Data = currentState->getData();
+    ap_win->setVals(AP_Data);
+    ap_win->show();
+    qWarning() << "AP settings window launched";
+}
+
+void MainWindow::on_actionHardware_Settings_triggered()
+{
+    hw_win->show();
+    qWarning() << "HW settings window launched.";
+}
+
+void MainWindow::closeEvent(QCloseEvent *e)
+{
+    QMainWindow::closeEvent(e);
+    if(ap_win->isVisible()) ap_win->close();
+    if(brkRampSettings->isVisible()) brkRampSettings->close();
+    if(brkSuckSettings->isVisible()) brkSuckSettings->close();
+    if(brkZapSettings->isVisible()) brkZapSettings->close();
+}
+
+void MainWindow::on_checkBoxPauseOnRemoval_stateChanged(int arg1)
+{
+
+}
+
+void MainWindow::on_pushButtonSCARACalibrate_released()
+{
+    hardwareCalibState.gui_calibrateSCARA();
+}
+
+void MainWindow::on_pushButtonArm1Clockwise_released()
+{
+    currentState->gui_rotateSCARA(1,1,numStepsScaraAdjust);
+}
+
+void MainWindow::on_pushButtonArm1Counterclockwise_released()
+{
+    currentState->gui_rotateSCARA(1,0,numStepsScaraAdjust);
+}
+
+void MainWindow::on_pushButtonArm2Counterclockwise_released()
+{
+    currentState->gui_rotateSCARA(2,0,numStepsScaraAdjust);
+}
+
+void MainWindow::on_pushButtonArm2Clockwise_released()
+{
+    currentState->gui_rotateSCARA(2,1,numStepsScaraAdjust);
+}
+
+void MainWindow::on_radioButton_toggled(bool checked)
+{
+    if(checked)
+    {
+        numStepsScaraAdjust = ui->radioButton->text().split(QRegExp("([^0-9])+"))[0].toInt();
+    }
+}
+
+void MainWindow::on_radioButton_2_toggled(bool checked)
+{
+    if(checked)
+    {
+        numStepsScaraAdjust = ui->radioButton_2->text().split(QRegExp("([^0-9])+"))[0].toInt();
+    }
+}
+
+void MainWindow::on_radioButton_3_toggled(bool checked)
+{
+    if(checked)
+    {
+        numStepsScaraAdjust = ui->radioButton_3->text().split(QRegExp("([^0-9])+"))[0].toInt();
+    }
+}
+
+void MainWindow::on_radioButton_4_toggled(bool checked)
+{
+    if(checked)
+    {
+        microfilFillVolumeAdjust = ui->radioButton_4->text().split(QRegExp("([^0-9])+"))[0].toInt();
+    }
+}
+void MainWindow::on_radioButton_5_toggled(bool checked)
+{
+    if(checked)
+    {
+        microfilFillVolumeAdjust = ui->radioButton_5->text().split(QRegExp("([^0-9])+"))[0].toInt();
+    }
+}
+void MainWindow::on_radioButton_6_toggled(bool checked)
+{
+    if(checked)
+    {
+        microfilFillVolumeAdjust = ui->radioButton_6->text().split(QRegExp("([^0-9])+"))[0].toInt();
+    }
+}
+void MainWindow::on_pushButtonDispenseLoadPipettes_released()
+{
+    if(currentState != NULL)
+        currentState->gui_dispenseVolumeFiller(microfilFillVolumeAdjust,false);
+}
+void MainWindow::on_pushButtonAspirateLoadPipettes_released()
+{
+    if(currentState != NULL)
+        currentState->gui_aspirateVolumeFiller(microfilFillVolumeAdjust,false);
+}
+void MainWindow::on_pushButtonNextLoadPipettes_released()
+{
+    if(currentState != NULL)
+        currentState->gui_pushbuttonNextLoadPipettesReleased();
+}
+void MainWindow::on_actionReset_Carousel_triggered()
+{
+    scara->resetCarousel();
+}
+void MainWindow::on_actionFill_Pipette_triggered()
+{
+    disconnectState(currentState);
+    QMetaObject::invokeMethod(scara,"fill1",Qt::QueuedConnection,Q_ARG(bool,false));
+    QMetaObject::invokeMethod(filler,"enablePressureControl",Qt::QueuedConnection,Q_ARG(bool,true),Q_ARG(bool,false));
+    QMetaObject::invokeMethod(scara,"fill2",Qt::QueuedConnection,Q_ARG(bool,false));
+    QThread::sleep(2);
+    QMetaObject::invokeMethod(scara,"dispenseHighPressure",Qt::QueuedConnection,Q_ARG(int,100),Q_ARG(bool,false));
+    QThread::sleep(1);
+    QMetaObject::invokeMethod(filler,"enablePressureControl",Qt::QueuedConnection,Q_ARG(bool,false));
+    QMetaObject::invokeMethod(scara,"fill3",Qt::QueuedConnection,Q_ARG(bool,false));
+    connectState(currentState);
+}
+
+
+void MainWindow::on_radioButton_7_toggled(bool checked)
+{
+    if(checked)
+    {
+        pipetteAdjustDistance = ui->radioButton_7->text().split(QRegExp("([^0-9])+"))[0].toInt();
+    }
+}
+void MainWindow::on_radioButton_8_toggled(bool checked)
+{
+    if(checked)
+    {
+        pipetteAdjustDistance = ui->radioButton_8->text().split(QRegExp("([^0-9])+"))[0].toInt();
+        qWarning() << pipetteAdjustDistance << ui->radioButton_8->text().split(QRegExp("([^0-9])+"))[0] ;
+    }
+}
+void MainWindow::on_radioButton_9_toggled(bool checked)
+{
+    if(checked)
+    {
+        pipetteAdjustDistance = ui->radioButton_9->text().split(QRegExp("([^0-9])+"))[0].toInt();
+    }
+}
+void MainWindow::on_radioButton_10_toggled(bool checked)
+{
+    if(checked)
+    {
+        pipetteAdjustDistance = ui->radioButton_10->text().split(QRegExp("([^0-9])+"))[0].toInt();
+    }
+}
+void MainWindow::on_pushButtonUpAdjust_released()
+{
+    if(currentState != NULL)
+        currentState->gui_upAdjustBtn(pipetteAdjustDistance);
+}
+void MainWindow::on_pushButtonDownAdjust_released()
+{
+    if(currentState != NULL)
+        currentState->gui_downAdjustBtn(pipetteAdjustDistance);
+}
+
+void MainWindow::on_actionLoad_microfil_20uL_triggered()
+{
+    if(currentState != NULL)
+        currentState->gui_Load20uLInMicrofil(false);
+}
+
+void MainWindow::on_actionHome_Thorlabs_Motor_triggered()
+{
+    tMotor->calibrate();
+}
+
+void MainWindow::on_actionOpen_Headstage_Clamp_triggered()
+{
+    headstageClamp->openClamp(false);
+}
+
+void MainWindow::on_actionRetract_Headstage_Wire_triggered()
+{
+    headstageClamp->retractWire(false);
+}
+
+void MainWindow::on_pushButtonPause_toggled(bool checked)
+{
+    if(checked)
+    {
+        ui->pushButtonPause->setText("Resume");
+    }
+    else
+    {
+        ui->pushButtonPause->setText("Pause");
+    }
+}
+
+void MainWindow::on_actionPreferences_triggered()
+{
+    pref_win->setFileFormat(AP_Data.fileFormat);
+    pref_win->setDataDir(AP_Data.dataDir);
+    pref_win->show();
+}

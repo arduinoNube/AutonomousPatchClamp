@@ -1,0 +1,24 @@
+* ABOUT AUTOPATCH4 *
+
+Autopatch4 is the code to control the autoswapper and the autopatcher in c++.
+
+It consists of 3 threads:
+    1. Thor motor thread
+    2. Mbed worker thread
+    3. DAQ worker thread
+    4. Main GUI thread
+
+All the threads are started in the main GUI thread and then the worker objects
+are moved to those new threads.  They are connected to the main GUI thread using
+a series of signals and slots.  The most notable of which are the dataReady
+signal from the DAQ worker that updates the plots and records a resistance
+measurement.
+
+The Autopatcher runs in the mainwindow.cpp file in the GUI thread.  The
+Autoswapper is mainly run in the Thor motor thread since while it's swapping it
+doesn't really need to interact with the Autopatcher or the main GUI.  It's kind
+of self contained in that way.  The Thor motor thread must also respond to the
+Autopatcher signals but it doesn't require a huge amount of functionality and is
+only minimally implemented.
+
+The DAQ thread on the other hand is very intertwined with the autopatcher algorithm.
